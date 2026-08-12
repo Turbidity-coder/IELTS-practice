@@ -6,8 +6,9 @@ description = "SQLite v2 schema, migrations, importers, and shadow-read for IELT
 publish = false
 
 [features]
-default = ["learning-event-ledger-v1"]
+default = ["learning-event-ledger-v1", "learning-observation-v1"]
 learning-event-ledger-v1 = []
+learning-observation-v1 = ["learning-event-ledger-v1"]
 
 [dependencies]
 ielts-domain = { path = "../ielts-domain" }

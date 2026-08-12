@@ -88,13 +88,13 @@ fn migration_is_forward_only_from_v11_fixture() {
         .unwrap();
     }
     let applied = migrate(&mut conn).unwrap();
-    assert_eq!(applied, vec![12]);
+    assert_eq!(applied, vec![12, 13]);
     let version: i64 = conn
         .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     let exists: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'learning_events'",
@@ -103,7 +103,7 @@ fn migration_is_forward_only_from_v11_fixture() {
         )
         .unwrap();
     assert_eq!(exists, 1);
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
 }
 
 #[test]

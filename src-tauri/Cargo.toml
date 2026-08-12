@@ -42,10 +42,15 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 tempfile = "3"
 
 [features]
-default = ["custom-protocol", "learning-event-ledger-v1"]
+default = ["custom-protocol", "learning-event-ledger-v1", "learning-observation-v1"]
 custom-protocol = ["tauri/custom-protocol"]
 learning-event-ledger-v1 = [
   "ielts-db/learning-event-ledger-v1",
   "ielts-application/learning-event-ledger-v1",
+]
+learning-observation-v1 = [
+  "learning-event-ledger-v1",
+  "ielts-db/learning-observation-v1",
+  "ielts-application/learning-observation-v1",
 ]
 developer-tools = []

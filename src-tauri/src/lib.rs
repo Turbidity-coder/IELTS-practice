@@ -88,6 +88,10 @@ pub fn run() {
             commands::learning::learning_events_rebuild,
             #[cfg(feature = "developer-tools")]
             commands::learning::learning_events_verify,
+            #[cfg(all(feature = "developer-tools", feature = "learning-observation-v1"))]
+            commands::learning::learning_observations_rebuild,
+            #[cfg(all(feature = "developer-tools", feature = "learning-observation-v1"))]
+            commands::learning::learning_observations_verify,
             commands::settings::list_settings,
             commands::settings::upsert_setting,
             commands::settings::migrate_local_preferences,

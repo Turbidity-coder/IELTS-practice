@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ielts_application::{
-    AgentStore, ApplicationError, CoachStore, EventSink, WritingEvaluationStore,
+    AgentStore, ApplicationError, CoachStore, EventSink, LearningObservationStore,
+    WritingEvaluationStore,
 };
 use ielts_db::{
     AppendCoachMessageCommand, BeginAgentRunCommand, BeginAgentToolCallCommand, CoachMessage,
@@ -132,6 +133,24 @@ impl AgentStore for ApplicationStore<'_> {
     }
 }
 
+impl LearningObservationStore for ApplicationStore<'_> {
+    fn rebuild_learning_observations(
+        &self,
+    ) -> Result<ielts_db::LearningObservationsRebuildReport, ApplicationError> {
+        self.db
+            .with_conn(ielts_db::learning_observations_rebuild)
+            .map_err(observation_error)
+    }
+
+    fn verify_learning_observations(
+        &self,
+    ) -> Result<ielts_db::LearningObservationsVerifyReport, ApplicationError> {
+        self.db
+            .with_conn(ielts_db::learning_observations_verify)
+            .map_err(observation_error)
+    }
+}
+
 pub(crate) struct ChannelEventSink {
     channel: Channel<EvaluationEvent>,
     closed: AtomicBool,
@@ -168,4 +187,12 @@ fn enrichment_error(error: ielts_db::DbError) -> ApplicationError {
 
 fn agent_error(error: ielts_db::DbError) -> ApplicationError {
     ApplicationError::new("agent.persistence_failed", error.to_string(), false)
+}
+
+fn observation_error(error: ielts_db::DbError) -> ApplicationError {
+    ApplicationError::new(
+        "learning.observation_projection_failed",
+        error.to_string(),
+        false,
+    )
 }

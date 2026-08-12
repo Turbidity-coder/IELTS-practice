@@ -12,6 +12,7 @@ pub mod dictionary;
 pub mod history;
 pub mod import;
 pub mod learning_events;
+pub mod learning_observations;
 pub mod learning_tools;
 pub mod migrate;
 pub mod modes;
@@ -37,6 +38,7 @@ pub use import::{
     scan_legacy_sqlite, LegacyDbScan, LegacyMigrationReport,
 };
 pub use learning_events::*;
+pub use learning_observations::*;
 pub use learning_tools::*;
 pub use migrate::*;
 pub use modes::*;

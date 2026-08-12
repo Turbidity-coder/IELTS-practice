@@ -7,11 +7,13 @@
 pub mod agent;
 pub mod coach;
 pub mod error;
+pub mod learning_observations;
 pub mod ports;
 pub mod writing_evaluation;
 
 pub use agent::*;
 pub use coach::CoachService;
 pub use error::ApplicationError;
+pub use learning_observations::{LearningObservationService, LearningObservationStore};
 pub use ports::*;
 pub use writing_evaluation::{EvaluationBackend, StartEvaluationOutcome, WritingEvaluationService};

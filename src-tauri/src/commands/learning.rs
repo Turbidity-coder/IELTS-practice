@@ -1,9 +1,13 @@
+#[cfg(all(feature = "developer-tools", feature = "learning-observation-v1"))]
+use ielts_application::LearningObservationService;
 use ielts_domain::{
     AttemptComparison, AttemptEvidenceView, CommandResponse, CompareAttemptsQuery, ErrorEnvelope,
     LearningEventSearchResult, QuestionHistory, QuestionHistoryQuery, SearchLearningEventsQuery,
 };
 use tauri::State;
 
+#[cfg(all(feature = "developer-tools", feature = "learning-observation-v1"))]
+use crate::app::application_store::ApplicationStore;
 use crate::app::state::AppDb;
 
 #[tauri::command]
@@ -55,6 +59,24 @@ pub fn learning_events_verify(
     respond(db.with_conn(ielts_db::learning_events_verify))
 }
 
+#[tauri::command]
+#[cfg(all(feature = "developer-tools", feature = "learning-observation-v1"))]
+pub fn learning_observations_rebuild(
+    db: State<'_, AppDb>,
+) -> CommandResponse<ielts_db::LearningObservationsRebuildReport> {
+    let store = ApplicationStore::new(db.inner());
+    respond_application(LearningObservationService::new(&store).rebuild())
+}
+
+#[tauri::command]
+#[cfg(all(feature = "developer-tools", feature = "learning-observation-v1"))]
+pub fn learning_observations_verify(
+    db: State<'_, AppDb>,
+) -> CommandResponse<ielts_db::LearningObservationsVerifyReport> {
+    let store = ApplicationStore::new(db.inner());
+    respond_application(LearningObservationService::new(&store).verify())
+}
+
 fn respond<T>(result: ielts_db::DbResult<T>) -> CommandResponse<T> {
     match result {
         Ok(value) => CommandResponse::success(value),
@@ -62,6 +84,20 @@ fn respond<T>(result: ielts_db::DbResult<T>) -> CommandResponse<T> {
             "learning.evidence_failed",
             error.to_string(),
             false,
+        )),
+    }
+}
+
+#[cfg(all(feature = "developer-tools", feature = "learning-observation-v1"))]
+fn respond_application<T>(
+    result: Result<T, ielts_application::ApplicationError>,
+) -> CommandResponse<T> {
+    match result {
+        Ok(value) => CommandResponse::success(value),
+        Err(error) => CommandResponse::failure(ErrorEnvelope::new(
+            error.code,
+            error.message,
+            error.retryable,
         )),
     }
 }

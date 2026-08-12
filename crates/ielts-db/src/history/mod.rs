@@ -463,6 +463,9 @@ pub fn export_history(
 pub fn delete_attempt(conn: &Connection, attempt_id: &str) -> DbResult<bool> {
     let tx = conn.unchecked_transaction()?;
     let deleted = delete_attempt_graph_in_transaction(&tx, attempt_id)?;
+    if deleted {
+        crate::learning_observations::learning_observations_rebuild_in_transaction(&tx)?;
+    }
     tx.commit()?;
     Ok(deleted)
 }
@@ -484,6 +487,9 @@ pub fn delete_history_attempts(conn: &Connection, attempt_ids: &[String]) -> DbR
         if delete_attempt_graph_in_transaction(&tx, id)? {
             deleted += 1;
         }
+    }
+    if deleted > 0 {
+        crate::learning_observations::learning_observations_rebuild_in_transaction(&tx)?;
     }
     tx.commit()?;
     Ok(deleted)
@@ -519,6 +525,9 @@ pub fn clear_history(conn: &Connection, activity: Option<Activity>) -> DbResult<
         if delete_attempt_graph_in_transaction(&tx, &id)? {
             deleted += 1;
         }
+    }
+    if deleted > 0 {
+        crate::learning_observations::learning_observations_rebuild_in_transaction(&tx)?;
     }
     tx.commit()?;
     Ok(deleted)
@@ -666,6 +675,9 @@ pub fn prune_terminal_attempts_in_transaction(conn: &Connection) -> DbResult<u32
     };
     for attempt_id in &ids {
         delete_attempt_graph_in_transaction(conn, attempt_id)?;
+    }
+    if !ids.is_empty() {
+        crate::learning_observations::learning_observations_rebuild_in_transaction(conn)?;
     }
     Ok(ids.len() as u32)
 }

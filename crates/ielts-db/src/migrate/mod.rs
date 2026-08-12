@@ -75,6 +75,11 @@ fn migrations() -> &'static [Migration] {
                 name: "learning_event_ledger",
                 sql: include_str!("../../migrations/0012_learning_event_ledger.sql"),
             },
+            Migration {
+                version: 13,
+                name: "learning_observation_projection",
+                sql: include_str!("../../migrations/0013_learning_observation_projection.sql"),
+            },
         ]
     })
 }

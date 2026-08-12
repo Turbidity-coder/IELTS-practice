@@ -4,6 +4,19 @@ use crate::LearningEvent;
 
 pub const LEARNING_EVIDENCE_VERSION: u32 = 1;
 
+/// Stable Reading transition semantics shared by M1 read tools and M2
+/// observation projection. Keep this pure: it is part of the replay contract.
+pub fn question_transition_state(previous: Option<bool>, current: Option<bool>) -> &'static str {
+    match (previous, current) {
+        (None, _) => "first_observation",
+        (Some(false), Some(true)) => "corrected",
+        (Some(true), Some(false)) => "newly_wrong",
+        (Some(false), Some(false)) => "still_wrong",
+        (Some(true), Some(true)) => "still_correct",
+        _ => "unscored",
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunKind {

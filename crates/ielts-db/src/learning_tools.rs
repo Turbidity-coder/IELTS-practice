@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use ielts_domain::{
-    AttemptComparison, AttemptEvidenceScore, AttemptEvidenceSummary, AttemptEvidenceView,
-    AttemptTimelinePoint, CompareAttemptsQuery, LearningEventSearchResult, QuestionEvidence,
-    QuestionHistory, QuestionHistoryObservation, QuestionHistoryQuery, QuestionTransition,
-    SearchLearningEventsQuery, TimelineSummary, LEARNING_EVIDENCE_VERSION,
+    question_transition_state, AttemptComparison, AttemptEvidenceScore, AttemptEvidenceSummary,
+    AttemptEvidenceView, AttemptTimelinePoint, CompareAttemptsQuery, LearningEventSearchResult,
+    QuestionEvidence, QuestionHistory, QuestionHistoryObservation, QuestionHistoryQuery,
+    QuestionTransition, SearchLearningEventsQuery, TimelineSummary, LEARNING_EVIDENCE_VERSION,
 };
 use rusqlite::{params, Connection};
 
@@ -125,8 +125,11 @@ pub fn compare_attempts_for_asset(
                 question_id: question.question_id.clone(),
                 attempt_id: attempt_id.clone(),
                 previous_attempt_id: previous.map(|value| value.0.clone()),
-                state: transition_state(previous.and_then(|value| value.1), question.is_correct)
-                    .into(),
+                state: question_transition_state(
+                    previous.and_then(|value| value.1),
+                    question.is_correct,
+                )
+                .into(),
                 first_try_correct: question.first_try_correct,
                 change_count: question.change_count,
                 elapsed_ms: question.elapsed_ms,
@@ -242,17 +245,6 @@ fn summarize_questions(questions: &[QuestionEvidence]) -> TimelineSummary {
         change_count: questions.iter().map(|question| question.change_count).sum(),
         visit_count: questions.iter().map(|question| question.visit_count).sum(),
         question_elapsed_ms: questions.iter().map(|question| question.elapsed_ms).sum(),
-    }
-}
-
-fn transition_state(previous: Option<bool>, current: Option<bool>) -> &'static str {
-    match (previous, current) {
-        (None, _) => "first_observation",
-        (Some(false), Some(true)) => "corrected",
-        (Some(true), Some(false)) => "newly_wrong",
-        (Some(false), Some(false)) => "still_wrong",
-        (Some(true), Some(true)) => "still_correct",
-        _ => "unscored",
     }
 }
 

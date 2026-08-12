@@ -6,8 +6,12 @@ description = "Application use cases for IELTS Practice"
 publish = false
 
 [features]
-default = ["learning-event-ledger-v1"]
+default = ["learning-event-ledger-v1", "learning-observation-v1"]
 learning-event-ledger-v1 = ["ielts-db/learning-event-ledger-v1"]
+learning-observation-v1 = [
+  "learning-event-ledger-v1",
+  "ielts-db/learning-observation-v1",
+]
 
 [dependencies]
 async-trait = "0.1"
