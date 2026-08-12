@@ -57,6 +57,7 @@ pub fn run() {
             commands::ai::ai_set_default_config,
             commands::agent::agent_pick_workspace,
             commands::agent::agent_run,
+            commands::agent::agent_run_attempt_review,
             commands::agent::agent_get_run,
             commands::diagnostics::get_app_info,
             commands::diagnostics::check_for_updates,
@@ -79,6 +80,14 @@ pub fn run() {
             commands::history::import_reading_archive_value,
             commands::history::history_get_retention_policy,
             commands::history::history_set_retention_policy,
+            commands::learning::learning_get_attempt_detail,
+            commands::learning::learning_compare_attempts,
+            commands::learning::learning_get_question_history,
+            commands::learning::learning_search_events,
+            #[cfg(feature = "developer-tools")]
+            commands::learning::learning_events_rebuild,
+            #[cfg(feature = "developer-tools")]
+            commands::learning::learning_events_verify,
             commands::settings::list_settings,
             commands::settings::upsert_setting,
             commands::settings::migrate_local_preferences,
@@ -145,9 +154,7 @@ pub fn run() {
             commands::enrichment::vocab_review,
             commands::enrichment::vocab_delete,
             commands::enrichment::coach_ensure_thread,
-            commands::enrichment::coach_append_message,
             commands::enrichment::coach_list_messages,
-            commands::enrichment::coach_record_failure,
             commands::enrichment::coach_run,
         ])
         .setup(|app| {

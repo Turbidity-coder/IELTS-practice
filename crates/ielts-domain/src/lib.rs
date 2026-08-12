@@ -6,9 +6,13 @@
 pub mod domain;
 pub mod dto;
 pub mod error;
+pub mod learning_events;
+pub mod learning_tools;
 pub mod view;
 
 pub use domain::*;
 pub use dto::*;
 pub use error::*;
+pub use learning_events::*;
+pub use learning_tools::*;
 pub use view::*;

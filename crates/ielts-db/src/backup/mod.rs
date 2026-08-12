@@ -18,13 +18,48 @@ use crate::migrate::current_version;
 use crate::settings::{list_secret_refs, list_settings, put_secret_ref, upsert_setting};
 use crate::sqlite::{DbError, DbResult};
 
-pub const BACKUP_SCHEMA_VERSION: u32 = 7;
+pub const BACKUP_SCHEMA_VERSION: u32 = 8;
 const LEGACY_BACKUP_SCHEMA_VERSION: u32 = 1;
 
 // Parent tables precede their children. Restore inserts in this order and
 // clears in reverse order, so foreign keys remain enabled for the whole
 // transaction.
 const CANONICAL_TABLES: &[&str] = &[
+    "practice_assets",
+    "writing_topics",
+    "writing_prompts",
+    "reading_suites",
+    "attempts",
+    "history_retention_policy",
+    "attempt_answers",
+    "attempt_annotations",
+    "writing_evaluations",
+    "writing_drafts",
+    "attempt_idempotency",
+    "evaluation_sessions",
+    "evaluation_checkpoints",
+    "evaluation_events",
+    "evaluation_lineage",
+    "reading_suite_items",
+    "endless_sessions",
+    "reading_timer_states",
+    "mode_idempotency",
+    "coach_threads",
+    "coach_messages",
+    "agent_runs",
+    "agent_tool_calls",
+    "learning_events",
+    "vocabulary_items",
+    "vocabulary_review_state",
+    "dictionary_entries",
+    "settings",
+    "migration_meta",
+];
+
+// Schema v7 predates the Learning Event Ledger. Keep this exact list frozen so
+// checksummed v7 packages remain structurally valid after the current schema
+// grows.
+const V7_CANONICAL_TABLES: &[&str] = &[
     "practice_assets",
     "writing_topics",
     "writing_prompts",
@@ -206,8 +241,10 @@ const V2_CANONICAL_TABLES: &[&str] = &[
 ];
 
 fn snapshot_tables_for_schema(schema_version: u32) -> &'static [&'static str] {
-    if schema_version >= 7 {
+    if schema_version >= 8 {
         CANONICAL_TABLES
+    } else if schema_version == 7 {
+        V7_CANONICAL_TABLES
     } else if schema_version == 6 {
         V6_CANONICAL_TABLES
     } else if schema_version == 5 {

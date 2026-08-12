@@ -148,6 +148,7 @@ fn begin_run(id: &str) -> BeginAgentRunCommand {
         id: id.into(),
         provider_id: "openai-compatible".into(),
         model: "fake-model".into(),
+        run_kind: ielts_domain::AgentRunKind::Workspace,
     }
 }
 

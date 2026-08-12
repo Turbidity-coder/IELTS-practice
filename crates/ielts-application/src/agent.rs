@@ -3,6 +3,7 @@ use ielts_db::{
     BeginAgentRunCommand, BeginAgentToolCallCommand, FinishAgentRunCommand,
     FinishAgentToolCallCommand,
 };
+use ielts_domain::AgentRunKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -241,6 +242,7 @@ pub struct RunAgentCommand {
     pub run_id: String,
     pub provider_id: String,
     pub model: String,
+    pub run_kind: AgentRunKind,
     pub system_prompt: String,
     pub user_prompt: String,
     pub temperature: f32,
@@ -253,6 +255,7 @@ pub struct AgentRunOutcome {
     pub run_id: String,
     pub content: String,
     pub model: String,
+    pub run_kind: AgentRunKind,
     pub actual_model: String,
     pub rounds: u32,
     pub tool_calls: u32,
@@ -266,6 +269,7 @@ pub struct AgentRunOutcome {
 }
 
 struct AgentRunTrace {
+    run_kind: AgentRunKind,
     actual_model: Option<String>,
     latency_ms: u64,
     usage: Option<TokenUsage>,
@@ -275,8 +279,9 @@ struct AgentRunTrace {
 }
 
 impl AgentRunTrace {
-    fn new(prompt_hash: String) -> Self {
+    fn new(run_kind: AgentRunKind, prompt_hash: String) -> Self {
         Self {
+            run_kind,
             actual_model: None,
             latency_ms: 0,
             usage: None,
@@ -312,6 +317,7 @@ impl AgentRunTrace {
 
     fn result_json(&self, has_content: bool) -> Value {
         json!({
+            "runKind": self.run_kind,
             "actualModel": self.actual_model,
             "hasContent": has_content,
             "latencyMs": self.latency_ms,
@@ -343,9 +349,10 @@ impl AgentService {
             id: command.run_id.clone(),
             provider_id: command.provider_id.clone(),
             model: command.model.clone(),
+            run_kind: command.run_kind,
         })?;
 
-        let mut trace = AgentRunTrace::new(prompt_hash);
+        let mut trace = AgentRunTrace::new(command.run_kind, prompt_hash);
         let mut messages = vec![
             AgentMessage::System {
                 content: command.system_prompt,
@@ -433,6 +440,7 @@ impl AgentService {
                     run_id: command.run_id,
                     content,
                     model: actual_model.clone(),
+                    run_kind: command.run_kind,
                     actual_model,
                     rounds: round,
                     tool_calls: tool_call_count,
@@ -1209,6 +1217,7 @@ mod tests {
             run_id: "run-1".into(),
             provider_id: "openai-compatible".into(),
             model: "fake-model".into(),
+            run_kind: AgentRunKind::Workspace,
             system_prompt: "Use tools when needed.".into(),
             user_prompt: "Read note.txt".into(),
             temperature: 0.1,

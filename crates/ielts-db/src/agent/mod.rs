@@ -4,6 +4,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use ielts_domain::AgentRunKind;
+
 use crate::sqlite::{DbError, DbResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +92,7 @@ pub struct AgentRunRecord {
     pub id: String,
     pub provider_id: String,
     pub model: String,
+    pub run_kind: AgentRunKind,
     pub status: StoredAgentRunStatus,
     pub rounds: u32,
     pub tool_call_count: u32,
@@ -123,6 +126,8 @@ pub struct BeginAgentRunCommand {
     pub id: String,
     pub provider_id: String,
     pub model: String,
+    #[serde(default)]
+    pub run_kind: AgentRunKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,12 +175,20 @@ pub fn begin_agent_run(conn: &Connection, command: &BeginAgentRunCommand) -> DbR
     require_text(&command.provider_id, "agent provider id")?;
     require_text(&command.model, "agent model")?;
     let now = chrono::Utc::now().to_rfc3339();
+    let result_json = serde_json::to_string(&json!({"runKind": command.run_kind}))
+        .map_err(|error| DbError::Message(error.to_string()))?;
     conn.execute(
         "INSERT INTO agent_runs (
             id, provider_id, model, status, rounds, tool_call_count,
             result_json, error_json, created_at, updated_at, completed_at
-         ) VALUES (?1, ?2, ?3, 'running', 0, 0, NULL, NULL, ?4, ?4, NULL)",
-        params![command.id, command.provider_id, command.model, now],
+         ) VALUES (?1, ?2, ?3, 'running', 0, 0, ?4, NULL, ?5, ?5, NULL)",
+        params![
+            command.id,
+            command.provider_id,
+            command.model,
+            result_json,
+            now
+        ],
     )?;
     Ok(())
 }
@@ -418,10 +431,19 @@ fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunRecord> {
     let result =
         parse_optional_json(result.as_deref(), "agent run result").map_err(to_sql_error)?;
     let error = parse_optional_json(error.as_deref(), "agent run error").map_err(to_sql_error)?;
+    let run_kind = result
+        .as_ref()
+        .and_then(|value| value.get("runKind"))
+        .and_then(Value::as_str)
+        .map(parse_run_kind)
+        .transpose()
+        .map_err(to_sql_error)?
+        .unwrap_or_default();
     Ok(AgentRunRecord {
         id: row.get(0)?,
         provider_id: row.get(1)?,
         model: row.get(2)?,
+        run_kind,
         status,
         rounds: row.get::<_, i64>(4)? as u32,
         tool_call_count: row.get::<_, i64>(5)? as u32,
@@ -432,6 +454,16 @@ fn map_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunRecord> {
         completed_at: row.get(10)?,
         tool_calls: Vec::new(),
     })
+}
+
+fn parse_run_kind(value: &str) -> DbResult<AgentRunKind> {
+    match value {
+        "workspace" => Ok(AgentRunKind::Workspace),
+        "attempt_review" => Ok(AgentRunKind::AttemptReview),
+        other => Err(DbError::Message(format!(
+            "invalid stored agent run kind: {other}"
+        ))),
+    }
 }
 
 fn require_text(value: &str, field: &str) -> DbResult<()> {

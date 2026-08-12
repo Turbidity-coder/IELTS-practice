@@ -94,6 +94,14 @@ impl AppDb {
             .map_err(|_| ielts_db::DbError::Message("db lock poisoned".into()))?;
         f(&guard)
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_connection(conn: rusqlite::Connection, path: PathBuf) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+            path,
+        }
+    }
 }
 
 pub struct AppVault(pub SecretVault);

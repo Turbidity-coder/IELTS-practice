@@ -170,6 +170,9 @@ export function mapHistoryDetailToSubmission(detail) {
 
   const accuracy = attempt.scoreValue ?? attempt.score_value ?? null
   const durationMs = attempt.durationMs ?? attempt.duration_ms ?? 0
+  const correctCount = attempt.correctCount ?? attempt.correct_count ?? 0
+  const questionCount = attempt.questionCount ?? attempt.question_count ?? 0
+  const percentage = accuracy != null ? Math.round(Number(accuracy) * 1000) / 10 : 0
   const assetId = attempt.assetId || attempt.asset_id || detail?.summary?.assetId || null
   const highlights = normalizeAnnotations(
     Array.isArray(attempt.annotations) ? attempt.annotations : []
@@ -185,9 +188,10 @@ export function mapHistoryDetailToSubmission(detail) {
     answerComparison,
     markedQuestions,
     score: accuracy,
-    correctCount: attempt.correctCount ?? attempt.correct_count ?? 0,
-    questionCount: attempt.questionCount ?? attempt.question_count ?? 0,
-    percentage: accuracy != null ? Math.round(Number(accuracy) * 1000) / 10 : null,
+    correctCount,
+    questionCount,
+    percentage,
+    scoreInfo: { correct: Number(correctCount) || 0, totalQuestions: Number(questionCount) || 0, percentage },
     durationMs,
     duration: Math.round(Number(durationMs || 0) / 1000),
     submittedAt: attempt.submittedAt || attempt.submitted_at || attempt.completedAt || attempt.completed_at || null,

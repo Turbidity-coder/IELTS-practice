@@ -34,6 +34,7 @@ assert.equal(ui.assetId, 'asset-1')
 assert.equal(ui.score, 0.8)
 assert.equal(ui.duration, 120)
 assert.equal(ui.source, 'tauri-endless')
+assert.deepEqual(ui.scoreInfo, { correct: 8, totalQuestions: 10, percentage: 80 })
 assert.deepEqual(ui.answerComparison.q1, {
   questionId: 'q1',
   userAnswer: 'A',

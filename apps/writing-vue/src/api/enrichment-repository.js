@@ -49,11 +49,6 @@ export async function ensureCoachThread(cmd) {
   return { source: 'tauri', thread: unwrapCommandResponse(response, 'coach_ensure_thread') }
 }
 
-export async function appendCoachMessage(cmd) {
-  const response = await invokeCommand('coach_append_message', { cmd })
-  return { source: 'tauri', message: unwrapCommandResponse(response, 'coach_append_message') }
-}
-
 export async function listCoachMessages(threadId, afterSequence = 0, limit = 100) {
   const response = await invokeCommand('coach_list_messages', {
     threadId,
@@ -61,17 +56,6 @@ export async function listCoachMessages(threadId, afterSequence = 0, limit = 100
     limit
   })
   return { source: 'tauri', items: unwrapCommandResponse(response, 'coach_list_messages') || [] }
-}
-
-export async function recordCoachFailure(threadId, error) {
-  const response = await invokeCommand('coach_record_failure', {
-    cmd: {
-      threadId,
-      error: error && typeof error === 'object' ? error : { message: String(error || 'coach failure') },
-      preserveScores: true
-    }
-  })
-  return { source: 'tauri', thread: unwrapCommandResponse(response, 'coach_record_failure') }
 }
 
 export const enrichmentRepository = {
@@ -84,9 +68,7 @@ export const enrichmentRepository = {
   listVocab,
   reviewVocab,
   ensureCoachThread,
-  appendCoachMessage,
   listCoachMessages,
-  recordCoachFailure,
   isTauriRuntime
 }
 

@@ -9,13 +9,11 @@ use crate::ai::load_runtime;
 use crate::app::application_store::ApplicationStore;
 use crate::app::state::{AppDb, AppVault};
 use ielts_db::{
-    append_coach_message, delete_annotation, delete_vocab, ensure_coach_thread, import_dictionary,
-    list_annotations, list_coach_messages, list_vocab, lookup_term, record_coach_failure,
-    revalidate_annotations, review_vocab, upsert_annotation, upsert_vocab, AnnotationRecord,
-    AppendCoachMessageCommand, CoachMessage, CoachRunResult, CoachThread, DictionaryEntry,
-    EnsureCoachThreadCommand, ImportDictionaryCommand, RecordCoachFailureCommand,
-    ReviewVocabCommand, RunCoachCommand, UpsertAnnotationCommand, UpsertVocabCommand,
-    VocabularyItem,
+    delete_annotation, delete_vocab, ensure_coach_thread, import_dictionary, list_annotations,
+    list_coach_messages, list_vocab, lookup_term, revalidate_annotations, review_vocab,
+    upsert_annotation, upsert_vocab, AnnotationRecord, CoachMessage, CoachRunResult, CoachThread,
+    DictionaryEntry, EnsureCoachThreadCommand, ImportDictionaryCommand, ReviewVocabCommand,
+    RunCoachCommand, UpsertAnnotationCommand, UpsertVocabCommand, VocabularyItem,
 };
 
 fn map_err(err: ielts_db::DbError) -> ErrorEnvelope {
@@ -157,17 +155,6 @@ pub fn coach_ensure_thread(
 }
 
 #[tauri::command]
-pub fn coach_append_message(
-    db: State<'_, AppDb>,
-    cmd: AppendCoachMessageCommand,
-) -> CommandResponse<CoachMessage> {
-    match db.with_conn(|conn| append_coach_message(conn, &cmd)) {
-        Ok(v) => CommandResponse::success(v),
-        Err(e) => CommandResponse::failure(map_err(e)),
-    }
-}
-
-#[tauri::command]
 pub fn coach_list_messages(
     db: State<'_, AppDb>,
     thread_id: String,
@@ -177,17 +164,6 @@ pub fn coach_list_messages(
     match db.with_conn(|conn| {
         list_coach_messages(conn, &thread_id, after_sequence, limit.unwrap_or(100))
     }) {
-        Ok(v) => CommandResponse::success(v),
-        Err(e) => CommandResponse::failure(map_err(e)),
-    }
-}
-
-#[tauri::command]
-pub fn coach_record_failure(
-    db: State<'_, AppDb>,
-    cmd: RecordCoachFailureCommand,
-) -> CommandResponse<CoachThread> {
-    match db.with_conn(|conn| record_coach_failure(conn, &cmd)) {
         Ok(v) => CommandResponse::success(v),
         Err(e) => CommandResponse::failure(map_err(e)),
     }

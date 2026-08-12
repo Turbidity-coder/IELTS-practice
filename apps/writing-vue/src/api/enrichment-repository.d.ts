@@ -54,13 +54,11 @@ export function upsertVocab(cmd: Record<string, unknown>): Promise<{ item?: unkn
 export function listVocab(limit?: number, offset?: number): Promise<unknown>
 export function reviewVocab(itemId: string, grade: unknown): Promise<unknown>
 export function ensureCoachThread(cmd: Record<string, unknown>): Promise<unknown>
-export function appendCoachMessage(cmd: Record<string, unknown>): Promise<unknown>
 export function listCoachMessages(
   threadId: string,
   afterSequence?: number,
   limit?: number
 ): Promise<{ items: CoachMessageRecord[] }>
-export function recordCoachFailure(threadId: string, error: unknown): Promise<unknown>
 
 export const enrichmentRepository: Record<string, unknown>
 export default enrichmentRepository

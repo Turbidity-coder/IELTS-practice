@@ -10,6 +10,7 @@ use ielts_domain::dto::{AttemptAnswer, AttemptRecord};
 
 use crate::attempts::upsert_attempt;
 use crate::history::prune_terminal_attempts_in_transaction;
+use crate::learning_events::project_reading_attempt_events_if_enabled;
 use crate::modes::timer::{
     load_reading_timer_state, save_reading_timer_state, TimerOwnerScope, TimerState,
 };
@@ -311,7 +312,7 @@ pub(crate) fn submit_reading_attempt_in_scope(
     upsert_attempt(conn, &attempt)?;
     let result = ReadingSubmitResult {
         attempt: attempt.clone(),
-        score: summary,
+        score: summary.clone(),
         comparisons: comparisons.clone(),
         idempotent_replay: false,
     };
@@ -326,6 +327,7 @@ pub(crate) fn submit_reading_attempt_in_scope(
         "DELETE FROM settings WHERE namespace = 'reading_draft' AND key = ?1",
         params![cmd.attempt_id],
     )?;
+    project_reading_attempt_events_if_enabled(conn, &attempt)?;
     Ok(result)
 }
 

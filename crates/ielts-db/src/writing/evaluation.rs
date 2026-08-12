@@ -17,6 +17,7 @@ use ielts_domain::ErrorEnvelope;
 
 use crate::attempts::writing_task_type_str;
 use crate::history::prune_terminal_attempts_in_transaction;
+use crate::learning_events::{append_learning_event_if_enabled, NewLearningEvent};
 use crate::sqlite::{DbError, DbResult};
 use crate::writing::draft::get_writing_draft;
 use crate::writing::eval_resolve::{
@@ -788,6 +789,35 @@ fn finalize_completed_in_transaction(
     // overwrite the attempt-level view of a newer retry.
     sync_attempt_from_latest_evaluation(conn, &session.attempt_id, &now)?;
 
+    let score = evaluation
+        .score
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    let degradation = evaluation
+        .degradation
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    append_learning_event_if_enabled(
+        conn,
+        NewLearningEvent::writing_evaluation_completed(
+            evaluation_id,
+            &session.attempt_id,
+            status_str(evaluation.status),
+            stage_str(evaluation.stage),
+            evaluation.task_type.map(writing_task_type_str),
+            score.as_ref(),
+            degradation.as_ref(),
+            None,
+            session.provider_id.as_deref(),
+            session.model.as_deref(),
+            now.clone(),
+        ),
+    )?;
+
     events.push(append_event(
         conn,
         evaluation_id,
@@ -857,6 +887,28 @@ fn finalize_failed_in_transaction(
     )?;
     let session = load_session(conn, session_id)?.expect("session");
     sync_attempt_from_latest_evaluation(conn, &session.attempt_id, &now)?;
+    let error = evaluation
+        .error
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| DbError::Message(error.to_string()))?;
+    append_learning_event_if_enabled(
+        conn,
+        NewLearningEvent::writing_evaluation_completed(
+            evaluation_id,
+            &session.attempt_id,
+            status_str(evaluation.status),
+            stage_str(evaluation.stage),
+            evaluation.task_type.map(writing_task_type_str),
+            None,
+            None,
+            error.as_ref(),
+            session.provider_id.as_deref(),
+            session.model.as_deref(),
+            now.clone(),
+        ),
+    )?;
     events.push(append_event(
         conn,
         evaluation_id,

@@ -4,6 +4,7 @@ pub mod backup;
 pub mod diagnostics;
 pub mod enrichment;
 pub mod history;
+pub mod learning;
 pub mod modes;
 pub mod paths;
 pub mod reading;

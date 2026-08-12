@@ -11,6 +11,8 @@ pub mod coach;
 pub mod dictionary;
 pub mod history;
 pub mod import;
+pub mod learning_events;
+pub mod learning_tools;
 pub mod migrate;
 pub mod modes;
 pub mod perf;
@@ -34,6 +36,8 @@ pub use import::{
     import_reading_archive_file, list_history_view_models, migrate_legacy_sqlite_to_v2,
     scan_legacy_sqlite, LegacyDbScan, LegacyMigrationReport,
 };
+pub use learning_events::*;
+pub use learning_tools::*;
 pub use migrate::*;
 pub use modes::*;
 pub use perf::*;

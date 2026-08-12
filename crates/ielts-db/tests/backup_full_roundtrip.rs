@@ -220,7 +220,7 @@ fn full_backup_roundtrip_preserves_every_user_truth_table() {
         .unwrap();
 
     let package = create_backup_package(&source, "roundtrip-test").unwrap();
-    assert_eq!(package.manifest.schema_version, 7);
+    assert_eq!(package.manifest.schema_version, 8);
     assert_eq!(
         package.manifest.table_count as usize,
         package.database.len()
@@ -434,6 +434,7 @@ fn legacy_v2_snapshot_without_writing_topics_remains_restorable() {
             && table.name != "reading_timer_states"
             && table.name != "agent_runs"
             && table.name != "agent_tool_calls"
+            && table.name != "learning_events"
     });
     legacy.manifest.table_count = legacy.database.len() as u32;
     legacy.manifest.row_count = legacy
@@ -493,6 +494,7 @@ fn legacy_v4_snapshot_projects_prompt_settings_inside_restore_transaction() {
             && table.name != "reading_timer_states"
             && table.name != "agent_runs"
             && table.name != "agent_tool_calls"
+            && table.name != "learning_events"
     });
     legacy.manifest.table_count = legacy.database.len() as u32;
     legacy.manifest.row_count = legacy
@@ -530,6 +532,7 @@ fn legacy_v5_snapshot_without_reading_timers_remains_restorable() {
         table.name != "reading_timer_states"
             && table.name != "agent_runs"
             && table.name != "agent_tool_calls"
+            && table.name != "learning_events"
     });
     legacy.manifest.table_count = legacy.database.len() as u32;
     legacy.manifest.row_count = legacy
@@ -561,9 +564,11 @@ fn legacy_v6_snapshot_without_agent_tables_remains_restorable() {
     let mut legacy = create_backup_package(&source, "agent-v6-source").unwrap();
     legacy.manifest.schema_version = 6;
     legacy.manifest.database_schema_version = 10;
-    legacy
-        .database
-        .retain(|table| table.name != "agent_runs" && table.name != "agent_tool_calls");
+    legacy.database.retain(|table| {
+        table.name != "agent_runs"
+            && table.name != "agent_tool_calls"
+            && table.name != "learning_events"
+    });
     legacy.manifest.table_count = legacy.database.len() as u32;
     legacy.manifest.row_count = legacy
         .database

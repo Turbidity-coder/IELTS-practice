@@ -1,11 +1,14 @@
 //! Coach thread/message incremental persistence (Phase 8).
 //! Auto-review failures never mutate attempt scores.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Transaction};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
+use ielts_domain::LearningEventType;
+
+use crate::learning_events::{append_learning_event_if_enabled, NewLearningEvent};
 use crate::sqlite::{DbError, DbResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -182,11 +185,21 @@ pub fn append_coach_message(
     conn: &Connection,
     cmd: &AppendCoachMessageCommand,
 ) -> DbResult<CoachMessage> {
+    let tx = conn.unchecked_transaction()?;
+    let message = append_coach_message_in_transaction(&tx, cmd)?;
+    tx.commit()?;
+    Ok(message)
+}
+
+fn append_coach_message_in_transaction(
+    conn: &Transaction<'_>,
+    cmd: &AppendCoachMessageCommand,
+) -> DbResult<CoachMessage> {
     if cmd.content.trim().is_empty() {
         return Err(DbError::Validation("content required".into()));
     }
     // ensure thread exists
-    let _ = get_thread(conn, &cmd.thread_id)?;
+    let thread = get_thread(conn, &cmd.thread_id)?;
     let next: i64 = conn.query_row(
         "SELECT COALESCE(MAX(sequence), 0) + 1 FROM coach_messages WHERE thread_id = ?1",
         params![cmd.thread_id],
@@ -217,7 +230,7 @@ pub fn append_coach_message(
         "UPDATE coach_threads SET updated_at = ?1, last_error_json = NULL WHERE id = ?2",
         params![now, cmd.thread_id],
     )?;
-    Ok(CoachMessage {
+    let message = CoachMessage {
         id,
         thread_id: cmd.thread_id.clone(),
         role,
@@ -226,7 +239,38 @@ pub fn append_coach_message(
         status: cmd.status.clone(),
         sequence: next as u32,
         created_at: now,
-    })
+    };
+    let event_type = match message.role.as_str() {
+        "user" => Some(LearningEventType::CoachQuestionAsked),
+        "assistant" => Some(LearningEventType::CoachResponseGenerated),
+        _ => None,
+    };
+    if let Some(event_type) = event_type {
+        append_learning_event_if_enabled(
+            conn,
+            NewLearningEvent {
+                event_type,
+                source_kind: "coach_message".into(),
+                source_id: Some(message.id.clone()),
+                activity: Some("reading".into()),
+                asset_id: thread.asset_id,
+                attempt_id: thread.attempt_id,
+                question_id: None,
+                skill_key: None,
+                occurred_at: message.created_at.clone(),
+                payload: json!({
+                    "messageId": message.id,
+                    "threadId": message.thread_id,
+                    "role": message.role,
+                    "sequence": message.sequence,
+                    "questionContext": message.structured_payload.as_ref().and_then(|value| value.get("questionId").cloned()),
+                }),
+                schema_version: LearningEventType::SCHEMA_VERSION,
+                sensitivity: "normal".into(),
+            },
+        )?;
+    }
+    Ok(message)
 }
 
 pub fn list_coach_messages(

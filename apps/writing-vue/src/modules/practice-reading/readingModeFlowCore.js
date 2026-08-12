@@ -10,6 +10,9 @@ export function mapTauriSubmissionToUi(rawSub, options = {}) {
   const markedQuestions = Array.isArray(options.markedQuestions) ? options.markedQuestions : []
   const durationSec = Math.round(Number(options.durationSec) || 0)
   const source = options.source || 'tauri'
+  const correctCount = rawSub.score && rawSub.score.correct
+  const questionCount = rawSub.score && rawSub.score.total
+  const percentage = rawSub.score && rawSub.score.percentage
   return {
     sessionId: rawSub.attempt && rawSub.attempt.id,
     attemptId: rawSub.attempt && rawSub.attempt.id,
@@ -17,9 +20,14 @@ export function mapTauriSubmissionToUi(rawSub, options = {}) {
     activity: 'reading',
     status: 'submitted',
     score: rawSub.score && rawSub.score.accuracy,
-    correctCount: rawSub.score && rawSub.score.correct,
-    questionCount: rawSub.score && rawSub.score.total,
-    percentage: rawSub.score && rawSub.score.percentage,
+    correctCount,
+    questionCount,
+    percentage,
+    scoreInfo: {
+      correct: Number(correctCount) || 0,
+      totalQuestions: Number(questionCount) || 0,
+      percentage: Number.isFinite(Number(percentage)) ? Number(percentage) : 0
+    },
     duration: durationSec,
     answers,
     markedQuestions,

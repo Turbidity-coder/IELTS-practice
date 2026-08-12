@@ -29,6 +29,64 @@
         </div>
       </div>
       <section
+        v-if="attemptReviewEnabled"
+        class="attempt-review-evidence"
+        data-reading-attempt-review
+      >
+        <div class="attempt-review-heading">
+          <div>
+            <span class="panel-kicker">Learning evidence</span>
+            <h3>历次练习对比</h3>
+          </div>
+          <button
+            class="btn-text"
+            type="button"
+            :disabled="attemptReviewStatus === 'loading' || !attemptReviewAvailable"
+            data-reading-attempt-review-run
+            @click="$emit('run-attempt-review')"
+          >
+            {{ attemptReviewStatus === 'loading' ? '分析中…' : 'AI 对比解读' }}
+          </button>
+        </div>
+        <p v-if="attemptReviewStatus === 'error'" class="settings-help settings-help-error" role="alert">
+          {{ attemptReviewError || '历次练习数据暂时不可用。' }}
+        </p>
+        <p v-else-if="attemptReviewLoading" class="settings-help" role="status">正在读取历次练习…</p>
+        <p v-else-if="!attemptReviewAvailable" class="settings-help">完成至少一次阅读提交后才会生成对比证据。</p>
+        <template v-else>
+          <p v-if="attemptReviewComparison?.repeatFamiliarityWarning" class="settings-help">
+            间隔较短的重复练习可能反映熟悉度，不等同于迁移能力提升。
+          </p>
+          <table v-if="attemptReviewComparison.attempts?.length" class="review-table attempt-review-table">
+            <thead>
+              <tr><th>次序</th><th>完成时间</th><th>正确数</th><th>用时</th><th>改答</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="attempt in attemptReviewComparison.attempts" :key="attempt.attemptId">
+                <td>{{ attempt.ordinal }}</td>
+                <td>{{ attempt.completedAt }}</td>
+                <td>{{ attempt.correctCount ?? '-' }}/{{ attempt.questionCount ?? '-' }}</td>
+                <td>{{ formatDuration(Math.round(Number(attempt.durationMs || 0) / 1000)) }}</td>
+                <td>{{ attempt.changeCount ?? 0 }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="settings-help">暂无其他已完成的同题练习。</p>
+          <div v-if="attemptReviewContent" class="attempt-review-explanation" data-reading-attempt-review-explanation>
+            <h4>AI 对比解读</h4>
+            <p>{{ attemptReviewContent }}</p>
+          </div>
+          <details v-if="attemptReviewToolCalls?.length" class="attempt-review-trace" data-reading-attempt-review-trace>
+            <summary>查看工具读取记录（{{ attemptReviewToolCalls.length }}）</summary>
+            <ul>
+              <li v-for="call in attemptReviewToolCalls" :key="call.callId || call.sequence">
+                <strong>{{ call.toolName }}</strong><span>{{ call.status }}</span>
+              </li>
+            </ul>
+          </details>
+        </template>
+      </section>
+      <section
         v-if="analysisSignals || singleAttemptAnalysis || singleAttemptAnalysisLlm || llmReviewStatus !== 'idle'"
         class="review-analysis"
         data-reading-analysis-panel
@@ -212,6 +270,14 @@ defineProps({
   singleAttemptAnalysisLlm: { type: Object, default: null },
   llmReviewStatus: { type: String, default: 'idle' },
   llmReviewMessage: { type: String, default: '' },
+  attemptReviewEnabled: { type: Boolean, default: false },
+  attemptReviewLoading: { type: Boolean, default: false },
+  attemptReviewAvailable: { type: Boolean, default: false },
+  attemptReviewComparison: { type: Object, default: null },
+  attemptReviewStatus: { type: String, default: 'idle' },
+  attemptReviewError: { type: String, default: '' },
+  attemptReviewContent: { type: String, default: '' },
+  attemptReviewToolCalls: { type: Array, default: () => [] },
   singleAttemptLlmDiagnosis: { type: Array, default: () => [] },
   singleAttemptLlmActions: { type: Array, default: () => [] },
   singleAttemptLlmQuestionAnalyses: { type: Array, default: () => [] },
@@ -227,5 +293,5 @@ defineProps({
   getReviewLabel: { type: Function, required: true }
 })
 
-defineEmits(['retry-review'])
+defineEmits(['retry-review', 'run-attempt-review'])
 </script>

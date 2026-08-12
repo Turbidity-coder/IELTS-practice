@@ -166,6 +166,11 @@ export function mapSubmitResultToSubmission(
     questionTimelineLite: extras.questionTimeline || [],
     answerComparison: comparison,
     scoreSummary: score,
+    scoreInfo: {
+      correct: Number(correctCount) || 0,
+      totalQuestions: Number(questionCount) || 0,
+      percentage: score.percentage ?? (accuracy != null ? Math.round(Number(accuracy) * 1000) / 10 : 0)
+    },
     submittedAt: attempt.submittedAt || attempt.completedAt || null,
     title: attempt.titleSnapshot || extras.titleSnapshot || null,
     source: 'tauri',

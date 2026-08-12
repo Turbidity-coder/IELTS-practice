@@ -70,6 +70,11 @@ fn migrations() -> &'static [Migration] {
                 name: "agent_runs_tool_calls",
                 sql: include_str!("../../migrations/0011_agent_runs_tool_calls.sql"),
             },
+            Migration {
+                version: 12,
+                name: "learning_event_ledger",
+                sql: include_str!("../../migrations/0012_learning_event_ledger.sql"),
+            },
         ]
     })
 }

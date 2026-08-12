@@ -51,6 +51,15 @@ function testVueRoutesAndShell() {
   has(routes, 'featureFlags.agentWorkspaceV1', 'Agent route feature flag')
   has(nav, 'featureFlags.agentWorkspaceV1', 'Agent navigation feature flag')
   has(flags, 'VITE_FEATURE_AGENT_WORKSPACE_V1', 'Agent build-time rollback flag')
+  has(flags, 'VITE_FEATURE_READING_ATTEMPT_REVIEW_V1', 'Attempt Review build-time rollback flag')
+  const readingPage = read('apps/writing-vue/src/views/PracticeReadingPage.vue')
+  const readingReview = read('apps/writing-vue/src/modules/practice-reading/components/ReadingReviewPanel.vue')
+  const learningRepository = read('apps/writing-vue/src/api/learning-repository.js')
+  has(readingPage, ':attempt-review-enabled="featureFlags.readingAttemptReviewV1"', 'Attempt Review UI flag gate')
+  has(readingReview, 'v-if="attemptReviewEnabled"', 'Attempt Review panel flag gate')
+  for (const command of ['learning_compare_attempts', 'agent_run_attempt_review', 'agent_get_run']) {
+    has(learningRepository, command, 'Attempt Review Tauri repository command')
+  }
   assert.equal(resolveFeatureFlag(undefined, true), true, 'Agent route remains enabled by default')
   assert.equal(resolveFeatureFlag('false', true), false, 'explicit false disables the Agent route')
   assert.equal(resolveFeatureFlag('TRUE', false), true, 'feature flag parsing is case-insensitive')

@@ -6,11 +6,12 @@ use tempfile::tempdir;
 use ielts_db::{
     append_coach_message, attempt_score_snapshot, delete_annotation, ensure_coach_thread,
     import_asset_payload_file, import_dictionary, list_annotations, list_coach_messages,
-    list_vocab, lookup_term, migrate, open_connection, record_coach_failure, resolve_anchor,
-    revalidate_annotations, review_vocab, submit_reading_attempt, upsert_annotation, upsert_vocab,
-    AppendCoachMessageCommand, DbOpenOptions, DictionaryEntry, EnsureCoachThreadCommand,
-    ImportDictionaryCommand, ReadingSubmitCommand, RecordCoachFailureCommand, ReviewVocabCommand,
-    TextAnchor, UpsertAnnotationCommand, UpsertVocabCommand,
+    list_learning_events, list_vocab, lookup_term, migrate, open_connection, record_coach_failure,
+    resolve_anchor, revalidate_annotations, review_vocab, submit_reading_attempt,
+    upsert_annotation, upsert_vocab, AppendCoachMessageCommand, DbOpenOptions, DictionaryEntry,
+    EnsureCoachThreadCommand, ImportDictionaryCommand, ReadingSubmitCommand,
+    RecordCoachFailureCommand, ReviewVocabCommand, TextAnchor, UpsertAnnotationCommand,
+    UpsertVocabCommand,
 };
 
 fn open_db() -> (tempfile::TempDir, rusqlite::Connection) {
@@ -323,6 +324,21 @@ fn coach_incremental_messages_failure_preserves_score() {
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0].sequence, 1);
     assert_eq!(msgs[1].sequence, 2);
+    let learning = list_learning_events(&conn, Some("asset-c"), Some("att-coach-1"), 20).unwrap();
+    assert_eq!(learning.len(), 4); // reading completion + outcome + coach question + response
+    assert!(learning
+        .iter()
+        .any(|event| event.event_type == ielts_domain::LearningEventType::CoachQuestionAsked));
+    assert!(learning
+        .iter()
+        .any(|event| event.event_type == ielts_domain::LearningEventType::CoachResponseGenerated));
+    assert!(!learning.iter().any(|event| event
+        .payload
+        .to_string()
+        .contains("Please review my mistakes")));
+    assert!(!learning
+        .iter()
+        .any(|event| event.payload.to_string().contains("TRUE/FALSE traps")));
 
     record_coach_failure(
         &conn,

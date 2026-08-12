@@ -348,7 +348,16 @@
           :format-review-answer="formatReviewAnswer"
           :get-legacy-result-class="getLegacyResultClass"
           :get-review-label="getReviewLabel"
+          :attempt-review-enabled="featureFlags.readingAttemptReviewV1"
+          :attempt-review-loading="attemptReviewLoading"
+          :attempt-review-available="Boolean(attemptReviewComparison)"
+          :attempt-review-comparison="attemptReviewComparison"
+          :attempt-review-status="attemptReviewStatus"
+          :attempt-review-error="attemptReviewError"
+          :attempt-review-content="attemptReviewContent"
+          :attempt-review-tool-calls="attemptReviewToolCalls"
           @retry-review="runAutomaticReviewCoach"
+          @run-attempt-review="runAttemptReview"
         />
       </ReadingQuestionPane>
     </section>
@@ -421,7 +430,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, onUpdated, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { practiceReadingSuite, practiceSessions } from '@/api/practice-client.js'
+import { learningRepository } from '@/api/learning-repository.js'
 import { readingCoachSettingsApi } from '@/modules/practice-reading/api'
+import { featureFlags } from '@/config/feature-flags.js'
 import ReadingAnswerNav from '@/modules/practice-reading/components/ReadingAnswerNav.vue'
 import ReadingCoachPanel from '@/modules/practice-reading/components/ReadingCoachPanel.vue'
 import ReadingPassagePane from '@/modules/practice-reading/components/ReadingPassagePane.vue'
@@ -502,6 +513,12 @@ const leaving = ref(false)
 const submitError = ref('')
 const snapshotMessage = ref('')
 const submission = ref(null)
+const attemptReviewComparison = ref(null)
+const attemptReviewLoading = ref(false)
+const attemptReviewStatus = ref('idle')
+const attemptReviewError = ref('')
+const attemptReviewContent = ref('')
+const attemptReviewToolCalls = ref([])
 const suiteSession = ref(null)
 const answerTimeline = reactive({})
 const markedQuestions = ref([])
@@ -975,6 +992,59 @@ function showSnapshotMessage(message, durationMs = 4200) {
   }, durationMs)
 }
 
+function resetAttemptReviewState() {
+  attemptReviewComparison.value = null
+  attemptReviewLoading.value = false
+  attemptReviewStatus.value = 'idle'
+  attemptReviewError.value = ''
+  attemptReviewContent.value = ''
+  attemptReviewToolCalls.value = []
+}
+
+async function loadAttemptReviewComparison() {
+  if (!featureFlags.readingAttemptReviewV1 || !submission.value?.attemptId || !asset.value?.id) {
+    resetAttemptReviewState()
+    return
+  }
+  attemptReviewLoading.value = true
+  attemptReviewError.value = ''
+  try {
+    attemptReviewComparison.value = await learningRepository.compareAttemptsForAsset({
+      assetId: asset.value.id,
+      limit: 5,
+      minimumGapHours: 12
+    })
+    attemptReviewStatus.value = 'idle'
+  } catch (error) {
+    attemptReviewComparison.value = null
+    attemptReviewStatus.value = 'error'
+    attemptReviewError.value = error?.message || '历次练习数据暂时不可用。'
+  } finally {
+    attemptReviewLoading.value = false
+  }
+}
+
+async function runAttemptReview() {
+  const attemptId = String(submission.value?.attemptId || '').trim()
+  if (!featureFlags.readingAttemptReviewV1 || !attemptId || attemptReviewStatus.value === 'loading') return
+  attemptReviewStatus.value = 'loading'
+  attemptReviewError.value = ''
+  attemptReviewContent.value = ''
+  attemptReviewToolCalls.value = []
+  try {
+    const outcome = await learningRepository.runAttemptReview({ attemptId })
+    attemptReviewContent.value = String(outcome?.content || '').trim()
+    if (outcome?.runId) {
+      const record = await learningRepository.getAgentRun(outcome.runId)
+      attemptReviewToolCalls.value = Array.isArray(record?.toolCalls) ? record.toolCalls : []
+    }
+    attemptReviewStatus.value = 'success'
+  } catch (error) {
+    attemptReviewStatus.value = 'error'
+    attemptReviewError.value = error?.message || 'AI 对比解读暂时不可用。'
+  }
+}
+
 onMounted(async () => {
   await initializeReadingPreferences()
   attachHighlightDocumentListeners()
@@ -1062,6 +1132,7 @@ async function loadAsset() {
   submitError.value = ''
   clearSnapshotMessage()
   submission.value = null
+  resetAttemptReviewState()
   suiteSession.value = null
   resetAttemptMetadata()
   resetReadingCoachState()
@@ -1121,6 +1192,16 @@ async function loadAsset() {
     }
   }
 }
+
+watch(
+  () => [submission.value?.attemptId || '', asset.value?.id || ''],
+  ([attemptId, assetId], previous) => {
+    if (attemptId && assetId && (attemptId !== previous?.[0] || assetId !== previous?.[1])) {
+      void loadAttemptReviewComparison()
+    }
+  },
+  { flush: 'post' }
+)
 
 async function loadSubmittedSession(sessionId) {
   const state = await practiceSessions.getState('reading', sessionId)
@@ -2625,6 +2706,56 @@ function getQuestionKindLabel(kind) {
 
 .llm-review-retry {
   flex: 0 0 auto;
+}
+
+.attempt-review-evidence {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--reading-border, rgba(120, 130, 150, 0.2));
+}
+
+.attempt-review-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.attempt-review-heading h3 {
+  margin: 0.2rem 0 0;
+}
+
+.attempt-review-table {
+  margin-top: 0.75rem;
+}
+
+.attempt-review-explanation {
+  margin-top: 0.8rem;
+  padding: 0.75rem 0.9rem;
+  border-left: 3px solid var(--reading-accent, #4f7cff);
+  background: rgba(79, 124, 255, 0.06);
+}
+
+.attempt-review-explanation h4 {
+  margin: 0 0 0.35rem;
+}
+
+.attempt-review-explanation p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.attempt-review-trace {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.attempt-review-trace ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.8rem;
+  margin: 0.5rem 0 0;
+  padding-left: 1rem;
 }
 
 .analysis-strip {

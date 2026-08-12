@@ -10,9 +10,9 @@ use tempfile::tempdir;
 
 use ielts_db::{
     clone_writing_draft, finish_evaluation, get_history_detail, get_writing_draft, list_events,
-    load_evaluation_for_attempt, migrate, open_connection, prepare_evaluation,
-    recover_interrupted_sessions, request_cancel, save_writing_draft, start_evaluation,
-    submit_writing_attempt, DbOpenOptions, DeterministicProvider, ProviderError,
+    list_learning_events, load_evaluation_for_attempt, migrate, open_connection,
+    prepare_evaluation, recover_interrupted_sessions, request_cancel, save_writing_draft,
+    start_evaluation, submit_writing_attempt, DbOpenOptions, DeterministicProvider, ProviderError,
     StartEvaluationCommand, WritingProvider,
 };
 use ielts_domain::domain::WritingTaskType;
@@ -441,6 +441,18 @@ fn evaluation_runs_stages_and_persists_checkpoints() {
     )
     .unwrap();
     assert_eq!(again.session.evaluation_id, result.session.evaluation_id);
+    let learning = list_learning_events(&conn, None, Some("a2"), 20).unwrap();
+    assert_eq!(learning.len(), 1);
+    assert_eq!(
+        learning[0].event_type,
+        ielts_domain::LearningEventType::WritingEvaluationCompleted
+    );
+    assert_eq!(
+        learning[0].payload["evaluationId"],
+        result.session.evaluation_id
+    );
+    assert!(learning[0].payload.get("contentText").is_none());
+    assert!(learning[0].payload.get("promptSnapshot").is_none());
 }
 
 struct FailReviewProvider;
@@ -490,6 +502,9 @@ fn review_failure_degrades_but_keeps_score() {
     assert_eq!(result.evaluation.status, EvaluationStatus::Degraded);
     assert!(result.evaluation.score.is_some());
     assert!(result.evaluation.degradation.is_some());
+    let learning = list_learning_events(&conn, None, Some("a3"), 20).unwrap();
+    assert_eq!(learning.len(), 1);
+    assert_eq!(learning[0].payload["status"], "degraded");
 }
 
 #[test]
