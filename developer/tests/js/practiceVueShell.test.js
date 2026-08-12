@@ -8,6 +8,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { resolveFeatureFlag } from '../../../apps/writing-vue/src/config/feature-flags.js'
+import { unwrapCommandResponse } from '../../../apps/writing-vue/src/api/tauri-bridge.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..', '..', '..')
@@ -28,6 +30,7 @@ function testVueRoutesAndShell() {
   const routes = read('apps/writing-vue/src/main.js')
   const app = read('apps/writing-vue/src/App.vue')
   const nav = read('apps/writing-vue/src/components/NavBar.vue')
+  const flags = read('apps/writing-vue/src/config/feature-flags.js')
 
   for (const route of [
     "path: '/library'",
@@ -45,6 +48,12 @@ function testVueRoutesAndShell() {
   for (const label of ["label: '阅读'", "label: '写作'", "label: 'Agent'", "label: '历史'", "label: '设置'"]) {
     has(nav, label, 'global product navigation')
   }
+  has(routes, 'featureFlags.agentWorkspaceV1', 'Agent route feature flag')
+  has(nav, 'featureFlags.agentWorkspaceV1', 'Agent navigation feature flag')
+  has(flags, 'VITE_FEATURE_AGENT_WORKSPACE_V1', 'Agent build-time rollback flag')
+  assert.equal(resolveFeatureFlag(undefined, true), true, 'Agent route remains enabled by default')
+  assert.equal(resolveFeatureFlag('false', true), false, 'explicit false disables the Agent route')
+  assert.equal(resolveFeatureFlag('TRUE', false), true, 'feature flag parsing is case-insensitive')
 }
 
 function testLibraryHasOneProductShell() {
@@ -181,10 +190,42 @@ function testNoRetiredHostBoundary() {
   assert.ok(!/\bfastify\s*=/.test(read('src-tauri/Cargo.toml')), 'Tauri host declares Fastify')
 }
 
+function testAgentWorkspaceFailureContract() {
+  const workspace = read('apps/writing-vue/src/views/AgentWorkspacePage.vue')
+  const repository = read('apps/writing-vue/src/api/agent-repository.js')
+
+  has(workspace, ':disabled="workspaceLocked"', 'Agent workspace run mutex')
+  has(workspace, '!workspaceLocked.value', 'Agent run button shares workspace mutex')
+  has(workspace, 'error?.context?.runId', 'failed Agent run hydration ID')
+  has(workspace, 'agentRepository.getRun(runId)', 'failed Agent SQLite hydration')
+  lacks(repository, 'record?.model', 'requested model fallback for actual model')
+
+  let thrown
+  try {
+    unwrapCommandResponse({
+      ok: false,
+      error: {
+        code: 'agent.provider_failed',
+        message: 'provider failed',
+        retryable: true,
+        context: { runId: 'run-failed' },
+        causeId: 'cause-failed'
+      }
+    }, 'agent_run')
+  } catch (error) {
+    thrown = error
+  }
+  assert.equal(thrown?.code, 'agent.provider_failed')
+  assert.equal(thrown?.retryable, true)
+  assert.deepEqual(thrown?.context, { runId: 'run-failed' })
+  assert.equal(thrown?.causeId, 'cause-failed')
+}
+
 testVueRoutesAndShell()
 testLibraryHasOneProductShell()
 testReadingActionOwnership()
 testTauriCommandBoundary()
 testSettingsNativeBackupOwnership()
 testNoRetiredHostBoundary()
+testAgentWorkspaceFailureContract()
 console.log('Tauri Vue shell contract: ok')

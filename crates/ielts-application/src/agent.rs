@@ -5,6 +5,7 @@ use ielts_db::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 use crate::{ApplicationError, ModelError, TokenUsage};
@@ -68,11 +69,63 @@ pub struct AgentModelResponse {
     pub usage: Option<TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
+    #[serde(default)]
+    pub retry_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentModelFailure {
+    pub error: ModelError,
+    pub model: Option<String>,
+    pub latency_ms: u64,
+    pub usage: Option<TokenUsage>,
+    pub provider_request_id: Option<String>,
+    pub retry_count: u32,
+}
+
+impl AgentModelFailure {
+    pub fn new(error: ModelError) -> Self {
+        Self {
+            error,
+            model: None,
+            latency_ms: 0,
+            usage: None,
+            provider_request_id: None,
+            retry_count: 0,
+        }
+    }
+
+    pub fn with_trace(
+        error: ModelError,
+        model: Option<String>,
+        latency_ms: u64,
+        usage: Option<TokenUsage>,
+        provider_request_id: Option<String>,
+        retry_count: u32,
+    ) -> Self {
+        Self {
+            error,
+            model,
+            latency_ms,
+            usage,
+            provider_request_id,
+            retry_count,
+        }
+    }
+}
+
+impl From<ModelError> for AgentModelFailure {
+    fn from(error: ModelError) -> Self {
+        Self::new(error)
+    }
 }
 
 #[async_trait]
 pub trait AgentModel: Send + Sync {
-    async fn respond(&self, request: AgentModelRequest) -> Result<AgentModelResponse, ModelError>;
+    async fn respond(
+        &self,
+        request: AgentModelRequest,
+    ) -> Result<AgentModelResponse, AgentModelFailure>;
 }
 
 pub use ielts_db::{
@@ -200,12 +253,74 @@ pub struct AgentRunOutcome {
     pub run_id: String,
     pub content: String,
     pub model: String,
+    pub actual_model: String,
     pub rounds: u32,
     pub tool_calls: u32,
+    pub latency_ms: u64,
+    pub retry_count: u32,
+    pub prompt_hash: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_request_id: Option<String>,
+}
+
+struct AgentRunTrace {
+    actual_model: Option<String>,
+    latency_ms: u64,
+    usage: Option<TokenUsage>,
+    retry_count: u32,
+    provider_request_id: Option<String>,
+    prompt_hash: String,
+}
+
+impl AgentRunTrace {
+    fn new(prompt_hash: String) -> Self {
+        Self {
+            actual_model: None,
+            latency_ms: 0,
+            usage: None,
+            retry_count: 0,
+            provider_request_id: None,
+            prompt_hash,
+        }
+    }
+
+    fn record_response(&mut self, response: &AgentModelResponse) {
+        if !response.model.trim().is_empty() {
+            self.actual_model = Some(response.model.clone());
+        }
+        self.latency_ms = self.latency_ms.saturating_add(response.latency_ms);
+        self.retry_count = self.retry_count.saturating_add(response.retry_count);
+        self.usage = merge_usage(self.usage.take(), response.usage.clone());
+        self.provider_request_id = response.provider_request_id.clone();
+    }
+
+    fn record_failure(&mut self, failure: &AgentModelFailure) {
+        if let Some(model) = failure
+            .model
+            .as_ref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            self.actual_model = Some(model.clone());
+        }
+        self.latency_ms = self.latency_ms.saturating_add(failure.latency_ms);
+        self.retry_count = self.retry_count.saturating_add(failure.retry_count);
+        self.usage = merge_usage(self.usage.take(), failure.usage.clone());
+        self.provider_request_id = failure.provider_request_id.clone();
+    }
+
+    fn result_json(&self, has_content: bool) -> Value {
+        json!({
+            "actualModel": self.actual_model,
+            "hasContent": has_content,
+            "latencyMs": self.latency_ms,
+            "usage": self.usage,
+            "retryCount": self.retry_count,
+            "providerRequestId": self.provider_request_id,
+            "promptHash": self.prompt_hash,
+        })
+    }
 }
 
 pub struct AgentService;
@@ -223,12 +338,14 @@ impl AgentService {
         T: AgentToolExecutor,
     {
         validate_command(&command)?;
+        let prompt_hash = sha256_hex(&command.system_prompt);
         store.begin_run(&BeginAgentRunCommand {
             id: command.run_id.clone(),
             provider_id: command.provider_id.clone(),
             model: command.model.clone(),
         })?;
 
+        let mut trace = AgentRunTrace::new(prompt_hash);
         let mut messages = vec![
             AgentMessage::System {
                 content: command.system_prompt,
@@ -239,7 +356,6 @@ impl AgentService {
         ];
         let definitions = tools.definitions();
         let mut tool_call_count = 0_u32;
-        let mut usage = None;
         let mut seen_tool_call_ids = HashSet::new();
 
         for round in 1..=command.limits.max_rounds {
@@ -252,11 +368,12 @@ impl AgentService {
                 .await
             {
                 Ok(response) => response,
-                Err(error) => {
+                Err(failure) => {
+                    trace.record_failure(&failure);
                     let error = ApplicationError::new(
                         "agent.provider_failed",
-                        error.message,
-                        error.retryable,
+                        failure.error.message,
+                        failure.error.retryable,
                     );
                     finish_failed_run_best_effort(
                         store,
@@ -264,12 +381,13 @@ impl AgentService {
                         AgentRunStatus::Failed,
                         round,
                         tool_call_count,
+                        &trace,
                         error.clone(),
                     );
                     return Err(error);
                 }
             };
-            usage = merge_usage(usage, response.usage.clone());
+            trace.record_response(&response);
 
             if response.tool_calls.is_empty() {
                 let content = response
@@ -293,6 +411,7 @@ impl AgentService {
                             AgentRunStatus::Failed,
                             round,
                             tool_call_count,
+                            &trace,
                             error.clone(),
                         );
                         return Err(error);
@@ -303,20 +422,25 @@ impl AgentService {
                     status: AgentRunStatus::Completed,
                     rounds: round,
                     tool_call_count,
-                    result: Some(json!({
-                        "model": response.model,
-                        "hasContent": true,
-                    })),
+                    result: Some(trace.result_json(true)),
                     error: None,
                 })?;
+                let actual_model = trace
+                    .actual_model
+                    .clone()
+                    .unwrap_or_else(|| command.model.clone());
                 return Ok(AgentRunOutcome {
                     run_id: command.run_id,
                     content,
-                    model: response.model,
+                    model: actual_model.clone(),
+                    actual_model,
                     rounds: round,
                     tool_calls: tool_call_count,
-                    usage,
-                    provider_request_id: response.provider_request_id,
+                    latency_ms: trace.latency_ms,
+                    retry_count: trace.retry_count,
+                    prompt_hash: trace.prompt_hash,
+                    usage: trace.usage,
+                    provider_request_id: trace.provider_request_id,
                 });
             }
 
@@ -336,6 +460,7 @@ impl AgentService {
                     status,
                     round,
                     tool_call_count,
+                    &trace,
                     error.clone(),
                 );
                 return Err(error);
@@ -384,6 +509,7 @@ impl AgentService {
             AgentRunStatus::LimitExceeded,
             command.limits.max_rounds,
             tool_call_count,
+            &trace,
             error.clone(),
         );
         Err(error)
@@ -464,6 +590,7 @@ fn finish_failed_run_best_effort<S: AgentStore>(
     status: AgentRunStatus,
     rounds: u32,
     tool_calls: u32,
+    trace: &AgentRunTrace,
     error: ApplicationError,
 ) {
     finish_run_best_effort(
@@ -473,7 +600,7 @@ fn finish_failed_run_best_effort<S: AgentStore>(
             status,
             rounds,
             tool_call_count: tool_calls,
-            result: None,
+            result: Some(trace.result_json(false)),
             error: Some(error_json(&error)),
         },
     );
@@ -498,6 +625,10 @@ fn merge_usage(current: Option<TokenUsage>, next: Option<TokenUsage>) -> Option<
             output_tokens: current.output_tokens.saturating_add(next.output_tokens),
         }),
     }
+}
+
+fn sha256_hex(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 #[cfg(test)]
@@ -567,7 +698,7 @@ mod tests {
     }
 
     struct ScriptedModel {
-        responses: Mutex<VecDeque<Result<AgentModelResponse, ModelError>>>,
+        responses: Mutex<VecDeque<Result<AgentModelResponse, AgentModelFailure>>>,
         requests: Mutex<Vec<AgentModelRequest>>,
         store: FakeStore,
     }
@@ -577,7 +708,7 @@ mod tests {
         async fn respond(
             &self,
             request: AgentModelRequest,
-        ) -> Result<AgentModelResponse, ModelError> {
+        ) -> Result<AgentModelResponse, AgentModelFailure> {
             assert!(
                 self.store.0.try_lock().is_ok(),
                 "store lock was held during model I/O"
@@ -632,6 +763,13 @@ mod tests {
         assert_eq!(outcome.content, "done");
         assert_eq!(outcome.rounds, 1);
         assert_eq!(outcome.tool_calls, 0);
+        assert_eq!(outcome.latency_ms, 1);
+        assert_eq!(outcome.retry_count, 0);
+        assert_eq!(
+            outcome.prompt_hash,
+            "057f0734e79e11e0529fd0d6bb41e5019d7a14933e6cf8219cba32e676946704"
+        );
+        assert_eq!(outcome.actual_model, "fake-model");
         assert_eq!(
             store
                 .0
@@ -643,18 +781,33 @@ mod tests {
                 .status,
             AgentRunStatus::Completed
         );
+        let result = store
+            .0
+            .lock()
+            .unwrap()
+            .run_finished
+            .as_ref()
+            .unwrap()
+            .result
+            .clone()
+            .unwrap();
+        assert_eq!(result["actualModel"], "fake-model");
+        assert_eq!(result["latencyMs"], 1);
+        assert_eq!(result["retryCount"], 0);
+        assert_eq!(result["usage"]["inputTokens"], 2);
+        assert_eq!(result["usage"]["outputTokens"], 1);
+        assert_eq!(result["providerRequestId"], "request-1");
+        assert_eq!(result["promptHash"], outcome.prompt_hash);
+        assert!(result.get("content").is_none());
     }
 
     #[tokio::test]
-    async fn executes_tool_calls_sequentially_and_returns_results_to_model() {
+    async fn replays_read_file_then_content() {
         let store = FakeStore::default();
         let model = model(
             &store,
             vec![
-                Ok(response(
-                    None,
-                    vec![call("call-1", "read_file"), call("call-2", "unknown")],
-                )),
+                Ok(response(None, vec![call("call-1", "read_file")])),
                 Ok(response(Some("finished"), vec![])),
             ],
         );
@@ -663,8 +816,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.tool_calls, 2);
-        assert_eq!(*tools.0.lock().unwrap(), vec!["read_file", "unknown"]);
+        assert_eq!(outcome.tool_calls, 1);
+        assert_eq!(*tools.0.lock().unwrap(), vec!["read_file"]);
         let requests = model.requests.lock().unwrap();
         let second = &requests[1].messages;
         assert!(matches!(
@@ -674,19 +827,128 @@ mod tests {
                 ..
             }
         ));
+        let state = store.0.lock().unwrap();
+        assert_eq!(state.calls_started.len(), 1);
+        assert_eq!(state.calls_finished[0].status, AgentToolStatus::Succeeded);
+        assert!(!state.calls_finished[0].result.to_string().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn replays_multiple_tools_in_sequence() {
+        let store = FakeStore::default();
+        let model = model(
+            &store,
+            vec![
+                Ok(response(
+                    None,
+                    vec![call("call-1", "read_file"), call("call-2", "read_file")],
+                )),
+                Ok(response(Some("finished"), vec![])),
+            ],
+        );
+        let tools = FakeTools::default();
+
+        let outcome = AgentService::run(&store, &model, &tools, command())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.tool_calls, 2);
+        assert_eq!(*tools.0.lock().unwrap(), vec!["read_file", "read_file"]);
+        let state = store.0.lock().unwrap();
+        assert_eq!(state.calls_started[0].sequence, 1);
+        assert_eq!(state.calls_started[1].sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn replays_unknown_tool_as_rejected_result() {
+        let store = FakeStore::default();
+        let model = model(
+            &store,
+            vec![
+                Ok(response(None, vec![call("call-unknown", "unknown")])),
+                Ok(response(Some("handled"), vec![])),
+            ],
+        );
+
+        let outcome = AgentService::run(&store, &model, &FakeTools::default(), command())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.content, "handled");
+        let state = store.0.lock().unwrap();
+        assert_eq!(state.calls_finished[0].status, AgentToolStatus::Rejected);
+        let requests = model.requests.lock().unwrap();
         assert!(matches!(
-            second[4],
+            requests[1].messages[3],
             AgentMessage::ToolResult { is_error: true, .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn aggregates_trace_metadata_across_model_rounds() {
+        let store = FakeStore::default();
+        let mut first = response(None, vec![call("call-1", "read_file")]);
+        first.latency_ms = 7;
+        first.retry_count = 1;
+        first.provider_request_id = Some("request-first".into());
+        let mut terminal = response(Some("finished"), vec![]);
+        terminal.latency_ms = 11;
+        terminal.retry_count = 2;
+        terminal.model = "provider-terminal-model".into();
+        terminal.provider_request_id = Some("request-terminal".into());
+        let model = model(&store, vec![Ok(first), Ok(terminal)]);
+
+        let outcome = AgentService::run(&store, &model, &FakeTools::default(), command())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.latency_ms, 18);
+        assert_eq!(outcome.retry_count, 3);
+        assert_eq!(outcome.actual_model, "provider-terminal-model");
+        assert_eq!(
+            outcome.provider_request_id.as_deref(),
+            Some("request-terminal")
+        );
+        assert_eq!(outcome.usage.unwrap().input_tokens, 4);
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_tool_arguments_without_losing_audit() {
+        let store = FakeStore::default();
+        let malformed = AgentToolCall {
+            id: "call-bad-json".into(),
+            name: "read_file".into(),
+            arguments_json: "{not-json".into(),
+        };
+        let model = model(
+            &store,
+            vec![
+                Ok(response(None, vec![malformed])),
+                Ok(response(Some("handled"), vec![])),
+            ],
+        );
+
+        let outcome = AgentService::run(&store, &model, &JsonValidatingTools::default(), command())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.content, "handled");
         let state = store.0.lock().unwrap();
-        assert_eq!(state.calls_started.len(), 2);
-        assert_eq!(state.calls_finished[1].status, AgentToolStatus::Rejected);
+        assert_eq!(state.calls_finished[0].status, AgentToolStatus::Rejected);
+        assert_eq!(
+            state.calls_finished[0].error.as_ref().unwrap()["code"],
+            "agent.invalid_arguments"
+        );
+        assert!(!state.calls_started[0]
+            .arguments
+            .to_string()
+            .contains("not-json"));
     }
 
     #[tokio::test]
     async fn persists_provider_failure() {
         let store = FakeStore::default();
-        let model = model(&store, vec![Err(ModelError::new("provider timeout", true))]);
+        let model = model(&store, vec![Err(failure("provider timeout", true))]);
         let error = AgentService::run(&store, &model, &FakeTools::default(), command())
             .await
             .unwrap_err();
@@ -699,6 +961,55 @@ mod tests {
             finish.error.as_ref().unwrap()["retryable"].as_bool(),
             Some(true)
         );
+        let trace = finish.result.as_ref().unwrap();
+        assert!(trace["actualModel"].is_null());
+        assert_eq!(trace["latencyMs"], 3);
+        assert_eq!(trace["retryCount"], 2);
+        assert_eq!(trace["providerRequestId"], "request-failed");
+        assert_eq!(
+            trace["promptHash"],
+            "057f0734e79e11e0529fd0d6bb41e5019d7a14933e6cf8219cba32e676946704"
+        );
+        assert_eq!(trace["hasContent"], false);
+        assert!(trace.get("content").is_none());
+    }
+
+    #[tokio::test]
+    async fn persists_aggregated_trace_when_a_later_model_round_fails() {
+        let store = FakeStore::default();
+        let mut first = response(None, vec![call("call-1", "read_file")]);
+        first.latency_ms = 7;
+        first.retry_count = 1;
+        first.provider_request_id = Some("request-first".into());
+        let terminal_failure = AgentModelFailure::with_trace(
+            ModelError::new("provider timeout", true),
+            Some("provider-failure-model".into()),
+            13,
+            Some(TokenUsage {
+                input_tokens: 5,
+                output_tokens: 0,
+            }),
+            Some("request-failed".into()),
+            2,
+        );
+        let model = model(&store, vec![Ok(first), Err(terminal_failure)]);
+
+        let error = AgentService::run(&store, &model, &FakeTools::default(), command())
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, "agent.provider_failed");
+        let state = store.0.lock().unwrap();
+        let finish = state.run_finished.as_ref().unwrap();
+        let trace = finish.result.as_ref().unwrap();
+        assert_eq!(finish.rounds, 2);
+        assert_eq!(finish.tool_call_count, 1);
+        assert_eq!(trace["actualModel"], "provider-failure-model");
+        assert_eq!(trace["latencyMs"], 20);
+        assert_eq!(trace["retryCount"], 3);
+        assert_eq!(trace["usage"]["inputTokens"], 7);
+        assert_eq!(trace["usage"]["outputTokens"], 1);
+        assert_eq!(trace["providerRequestId"], "request-failed");
     }
 
     #[tokio::test]
@@ -742,7 +1053,7 @@ mod tests {
     async fn failed_run_audit_finish_failure_does_not_mask_provider_error() {
         let store = FakeStore::default();
         store.0.lock().unwrap().fail_finish_run_once = true;
-        let model = model(&store, vec![Err(ModelError::new("provider timeout", true))]);
+        let model = model(&store, vec![Err(failure("provider timeout", true))]);
         let error = AgentService::run(&store, &model, &FakeTools::default(), command())
             .await
             .unwrap_err();
@@ -825,7 +1136,7 @@ mod tests {
 
     fn model(
         store: &FakeStore,
-        responses: Vec<Result<AgentModelResponse, ModelError>>,
+        responses: Vec<Result<AgentModelResponse, AgentModelFailure>>,
     ) -> ScriptedModel {
         ScriptedModel {
             responses: Mutex::new(responses.into()),
@@ -845,6 +1156,43 @@ mod tests {
                 output_tokens: 1,
             }),
             provider_request_id: Some("request-1".into()),
+            retry_count: 0,
+        }
+    }
+
+    fn failure(message: &str, retryable: bool) -> AgentModelFailure {
+        AgentModelFailure::with_trace(
+            ModelError::new(message, retryable),
+            None,
+            3,
+            None,
+            Some("request-failed".into()),
+            2,
+        )
+    }
+
+    #[derive(Default)]
+    struct JsonValidatingTools(FakeTools);
+
+    #[async_trait]
+    impl AgentToolExecutor for JsonValidatingTools {
+        fn definitions(&self) -> Vec<AgentToolDefinition> {
+            self.0.definitions()
+        }
+
+        fn audit_arguments(&self, call: &AgentToolCall) -> Value {
+            json!({"tool": call.name, "validJson": serde_json::from_str::<Value>(&call.arguments_json).is_ok()})
+        }
+
+        async fn execute(&self, call: &AgentToolCall) -> AgentToolExecution {
+            if serde_json::from_str::<Value>(&call.arguments_json).is_err() {
+                return AgentToolExecution::rejected(
+                    "agent.invalid_arguments",
+                    "tool arguments must be valid JSON",
+                    json!({"validJson": false}),
+                );
+            }
+            self.0.execute(call).await
         }
     }
 

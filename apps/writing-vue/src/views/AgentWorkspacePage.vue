@@ -22,8 +22,9 @@
           <button
             class="agent-icon-button"
             type="button"
-            aria-label="重置工作区预览"
-            title="重置工作区预览"
+            aria-label="清除工作区选择"
+            title="清除工作区选择"
+            :disabled="workspaceLocked"
             @click="resetWorkspace"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -35,7 +36,7 @@
           </button>
         </div>
 
-        <button class="agent-workspace-select" type="button" @click="toggleWorkspace">
+        <button class="agent-workspace-select" type="button" :disabled="workspaceLocked" @click="pickWorkspace">
           <span class="agent-workspace-select__icon" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-9Z"></path>
@@ -52,7 +53,7 @@
 
         <div class="agent-file-tree">
           <div class="agent-file-tree__label">
-            <span>文件</span>
+            <span>已访问文件</span>
             <span>{{ files.length }}</span>
           </div>
           <button
@@ -76,11 +77,14 @@
             </span>
             <span v-if="selectedFile === file.path" class="agent-file-row__marker" aria-hidden="true"></span>
           </button>
+          <p v-if="files.length === 0" class="agent-file-tree__empty">
+            {{ workspaceGrant ? 'Agent 访问文件后会显示在这里。' : '选择工作区后开始运行。' }}
+          </p>
         </div>
 
         <div class="agent-sidebar__footer">
           <span class="agent-sidebar__footer-dot" aria-hidden="true"></span>
-          <span>本地预览模式</span>
+          <span>{{ workspaceGrant ? '短期本地授权' : '尚未授权工作区' }}</span>
         </div>
       </aside>
 
@@ -126,11 +130,11 @@
             </span>
             <span>上下文</span>
           </div>
-          <button class="agent-context-chip" type="button" @click="selectFile(selectedFile)">
+          <button v-if="workspaceGrant" class="agent-context-chip" type="button" :disabled="workspaceLocked" @click="pickWorkspace">
             <span>{{ selectedFileName }}</span>
-            <span aria-hidden="true">×</span>
+            <span aria-hidden="true">↗</span>
           </button>
-          <button class="agent-add-context" type="button" aria-label="添加上下文" title="添加上下文" @click="selectNextFile">
+          <button class="agent-add-context" type="button" aria-label="选择工作区" title="选择工作区" :disabled="workspaceLocked" @click="pickWorkspace">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M12 5v14M5 12h14"></path>
             </svg>
@@ -138,12 +142,12 @@
         </div>
 
         <div class="agent-prompt-footer">
-          <span class="agent-prompt-footer__hint">{{ promptMode === 'plan' ? '先整理步骤，再开始运行' : '准备好后运行本地预览' }}</span>
-          <button class="agent-run-button" type="button" :disabled="runState === 'running'" @click="runPreview">
+          <span class="agent-prompt-footer__hint">{{ promptHint }}</span>
+          <button class="agent-run-button" type="button" :disabled="!canRun" @click="runAgent">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="m8 5 11 7-11 7V5Z"></path>
             </svg>
-            {{ runState === 'running' ? '运行中' : '运行预览' }}
+            {{ runState === 'running' ? '运行中' : '运行 Agent' }}
           </button>
         </div>
       </section>
@@ -154,13 +158,14 @@
             <p class="agent-panel__eyebrow">Run log</p>
             <h2>运行状态</h2>
           </div>
-          <span class="agent-run-count">#{{ runCount }}</span>
+          <span class="agent-run-count">#{{ runIdShort }}</span>
         </div>
 
         <div class="agent-run-summary" :class="`is-${runState}`">
           <span class="agent-run-summary__icon" aria-hidden="true">
             <svg v-if="runState === 'complete'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"></path></svg>
             <svg v-else-if="runState === 'running'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"></path></svg>
+            <svg v-else-if="runState === 'error'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="m6 6 12 12M18 6 6 18"></path></svg>
             <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"></path></svg>
           </span>
           <div>
@@ -186,6 +191,12 @@
             <span v-if="lastRunAt">{{ lastRunAt }}</span>
           </div>
           <p>{{ outputText }}</p>
+          <dl v-if="runMetadata.length" class="agent-output-metadata">
+            <div v-for="item in runMetadata" :key="item.label">
+              <dt>{{ item.label }}</dt>
+              <dd :title="item.value">{{ item.value }}</dd>
+            </div>
+          </dl>
         </div>
       </aside>
     </div>
@@ -193,45 +204,109 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, ref } from 'vue'
+import agentRepository from '@/api/agent-repository.js'
 
 const defaultPrompt = '请先阅读已选上下文，提炼关键事实，再给出一份简洁、可执行的学习建议。'
 const promptText = ref(defaultPrompt)
 const promptMode = ref('assist')
-const selectedFile = ref('reading-notes.md')
-const workspaceName = ref('IELTS Atlas Demo')
+const selectedFile = ref('')
+const workspaceGrant = ref(null)
+const workspaceBusy = ref(false)
 const runState = ref('idle')
-const runCount = ref(0)
+const lastRun = ref(null)
 const lastRunAt = ref('')
-const outputText = ref('运行结果会出现在这里。')
-let runTimer = 0
-
-const files = [
-  { path: 'reading-notes.md', name: 'reading-notes.md', kind: 'markdown', meta: '12 KB · 已选上下文' },
-  { path: 'writing-draft.txt', name: 'writing-draft.txt', kind: 'text', meta: '4 KB · 草稿' },
-  { path: 'study-plan.json', name: 'study-plan.json', kind: 'json', meta: '2 KB · 计划' }
-]
+const outputText = ref('选择本地工作区后，运行结果会出现在这里。')
+const workspaceLocked = computed(() => workspaceBusy.value || runState.value === 'running')
 
 const promptModes = [
   { value: 'assist', label: '辅助' },
   { value: 'plan', label: '规划' }
 ]
 
-const modelLabel = '本地配置模型'
-const selectedFileName = computed(() => files.find((file) => file.path === selectedFile.value)?.name || files[0].name)
-const workspaceStatus = computed(() => workspaceName.value === 'IELTS Atlas Demo' ? '演示工作区' : '本地工作区')
-const runStateLabel = computed(() => ({ idle: '待命', running: '运行中', complete: '已完成' })[runState.value])
+const files = computed(() => {
+  const byPath = new Map()
+  for (const call of lastRun.value?.toolCalls || []) {
+    const path = String(call.arguments?.path || call.result?.path || '').trim()
+    if (!path || byPath.has(path)) continue
+    const name = path.split(/[\\/]/).filter(Boolean).pop() || path
+    byPath.set(path, {
+      path,
+      name,
+      kind: fileKind(name),
+      meta: `${call.toolName} · ${toolStatusLabel(call.status)}`
+    })
+  }
+  return [...byPath.values()]
+})
+const workspaceName = computed(() => {
+  const path = workspaceGrant.value?.displayPath || ''
+  return path.split(/[\\/]/).filter(Boolean).pop() || '选择本地工作区'
+})
+const workspaceStatus = computed(() => workspaceGrant.value?.displayPath || '仅授权所选目录')
+const selectedFileName = computed(() => {
+  return files.value.find((file) => file.path === selectedFile.value)?.name || workspaceName.value
+})
+const modelLabel = computed(() => lastRun.value?.actualModel || '本地配置模型')
+const canRun = computed(() => {
+  return Boolean(workspaceGrant.value && promptText.value.trim() && !workspaceLocked.value)
+})
+const promptHint = computed(() => {
+  if (!workspaceGrant.value) return '先选择一个本地工作区'
+  return promptMode.value === 'plan' ? '先整理步骤，再开始运行' : '准备好后运行 Agent'
+})
+const runIdShort = computed(() => lastRun.value?.id?.slice(0, 8) || '--')
+const runStateLabel = computed(() => ({
+  idle: '待命',
+  running: '运行中',
+  complete: '已完成',
+  error: '运行失败'
+})[runState.value])
 const runStateDetail = computed(() => {
-  if (runState.value === 'running') return '正在准备本地预览'
-  if (runState.value === 'complete') return '结果已更新，可继续编辑'
-  return '等待提示词与上下文'
+  if (runState.value === 'running') return '模型与工具正在执行'
+  if (runState.value === 'complete') return `${lastRun.value?.rounds || 0} 轮 · ${lastRun.value?.toolCallCount || 0} 次工具调用`
+  if (runState.value === 'error') return '查看输出中的错误信息'
+  return workspaceGrant.value ? '等待提示词' : '等待工作区授权'
 })
 const runSteps = computed(() => {
-  const state = runState.value
+  const steps = [{
+    key: 'workspace',
+    label: '工作区授权',
+    detail: workspaceGrant.value ? workspaceName.value : '尚未选择',
+    state: workspaceGrant.value ? 'complete' : 'pending'
+  }]
+  if (runState.value === 'running') {
+    steps.push({ key: 'run', label: '执行 Agent', detail: '等待模型返回', state: 'active' })
+  }
+  for (const call of lastRun.value?.toolCalls || []) {
+    const path = call.arguments?.path || call.result?.path || `round ${call.round}`
+    steps.push({
+      key: `${call.sequence}-${call.callId}`,
+      label: call.toolName,
+      detail: `${toolStatusLabel(call.status)} · ${path}`,
+      state: call.status === 'succeeded' ? 'complete' : call.status === 'running' ? 'active' : 'error'
+    })
+  }
+  steps.push({
+    key: 'result',
+    label: '最终结果',
+    detail: lastRun.value ? `${lastRun.value.rounds} 轮 · run ${runIdShort.value}` : '尚未运行',
+    state: runState.value === 'complete' ? 'complete' : runState.value === 'error' ? 'error' : 'pending'
+  })
+  return steps.map((step, index) => ({ ...step, index: String(index + 1).padStart(2, '0') }))
+})
+const runMetadata = computed(() => {
+  const run = lastRun.value
+  if (!run) return []
+  const tokens = run.usage ? `${run.usage.inputTokens} in / ${run.usage.outputTokens} out` : '未返回'
   return [
-    { key: 'context', index: '01', label: '读取上下文', detail: selectedFileName.value, state: state === 'idle' ? 'pending' : 'complete' },
-    { key: 'prompt', index: '02', label: '整理提示词', detail: promptMode.value === 'plan' ? '规划模式' : '辅助模式', state: state === 'running' ? 'active' : state === 'complete' ? 'complete' : 'pending' },
-    { key: 'result', index: '03', label: '生成结果', detail: state === 'complete' ? '本地预览已完成' : '尚未运行', state: state === 'complete' ? 'complete' : 'pending' }
+    { label: 'Run ID', value: run.id },
+    { label: 'Actual model', value: run.actualModel || '未返回' },
+    { label: 'Latency', value: `${run.latencyMs} ms` },
+    { label: 'Usage', value: tokens },
+    { label: 'Retries', value: String(run.retryCount) },
+    { label: 'Request ID', value: run.providerRequestId || '未返回' },
+    { label: 'Prompt hash', value: run.promptHash || '未返回' }
   ]
 })
 
@@ -239,13 +314,23 @@ function selectFile(path) {
   selectedFile.value = path
 }
 
-function selectNextFile() {
-  const currentIndex = files.findIndex((file) => file.path === selectedFile.value)
-  selectedFile.value = files[(currentIndex + 1) % files.length].path
-}
-
-function toggleWorkspace() {
-  workspaceName.value = workspaceName.value === 'IELTS Atlas Demo' ? 'My IELTS Workspace' : 'IELTS Atlas Demo'
+async function pickWorkspace() {
+  if (workspaceLocked.value) return
+  workspaceBusy.value = true
+  try {
+    const grant = await agentRepository.pickWorkspace()
+    if (!grant) return
+    workspaceGrant.value = grant
+    selectedFile.value = ''
+    lastRun.value = null
+    runState.value = 'idle'
+    outputText.value = '工作区已授权，可以开始运行。'
+    lastRunAt.value = ''
+  } catch (error) {
+    showError(error)
+  } finally {
+    workspaceBusy.value = false
+  }
 }
 
 function resetPrompt() {
@@ -253,28 +338,79 @@ function resetPrompt() {
 }
 
 function resetWorkspace() {
-  window.clearTimeout(runTimer)
-  promptText.value = defaultPrompt
-  promptMode.value = 'assist'
-  selectedFile.value = files[0].path
-  workspaceName.value = 'IELTS Atlas Demo'
+  if (workspaceLocked.value) return
+  workspaceGrant.value = null
+  selectedFile.value = ''
+  lastRun.value = null
   runState.value = 'idle'
-  outputText.value = '运行结果会出现在这里。'
+  outputText.value = '选择本地工作区后，运行结果会出现在这里。'
   lastRunAt.value = ''
 }
 
-function runPreview() {
-  if (runState.value === 'running') return
+async function runAgent() {
+  if (!canRun.value) return
   runState.value = 'running'
-  runCount.value += 1
-  outputText.value = '正在生成本地预览…'
-  window.clearTimeout(runTimer)
-  runTimer = window.setTimeout(() => {
-    runState.value = 'complete'
-    lastRunAt.value = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    outputText.value = `已基于 ${selectedFileName.value} 生成一份可继续编辑的学习建议。`
-  }, 420)
+  lastRun.value = null
+  outputText.value = '正在执行模型与工作区工具…'
+  lastRunAt.value = ''
+  try {
+    const outcome = await agentRepository.run({
+      grantId: workspaceGrant.value.grantId,
+      prompt: promptText.value
+    })
+    const record = await agentRepository.getRun(outcome.runId)
+    if (!record) throw new Error(`Agent run ${outcome.runId} could not be reloaded from SQLite`)
+    const run = agentRepository.normalizeRun(outcome, record)
+    lastRun.value = run
+    selectedFile.value = files.value[0]?.path || ''
+    outputText.value = run.content || 'Agent 已完成，但未返回正文。'
+    lastRunAt.value = formatTime(run.completedAt)
+    runState.value = run.status === 'completed' ? 'complete' : 'error'
+  } catch (error) {
+    const failedRun = await hydrateFailedRun(error)
+    if (failedRun) {
+      lastRun.value = failedRun
+      selectedFile.value = files.value[0]?.path || ''
+    }
+    showError(error, failedRun?.completedAt)
+  }
 }
 
-onBeforeUnmount(() => window.clearTimeout(runTimer))
+async function hydrateFailedRun(error) {
+  const runId = String(error?.context?.runId || '').trim()
+  if (!runId) return null
+  try {
+    const record = await agentRepository.getRun(runId)
+    return record ? agentRepository.normalizeRun(null, record) : null
+  } catch {
+    return null
+  }
+}
+
+function showError(error, completedAt) {
+  runState.value = 'error'
+  outputText.value = error?.message || 'Agent 运行失败。'
+  lastRunAt.value = formatTime(completedAt)
+}
+
+function formatTime(value) {
+  const date = value ? new Date(value) : new Date()
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function fileKind(name) {
+  if (/\.md$/i.test(name)) return 'markdown'
+  if (/\.json$/i.test(name)) return 'json'
+  return 'text'
+}
+
+function toolStatusLabel(status) {
+  return ({
+    running: '执行中',
+    succeeded: '已完成',
+    rejected: '已拒绝',
+    failed: '失败',
+    interrupted: '已中断'
+  })[status] || status || '未知'
+}
 </script>

@@ -4,6 +4,12 @@
 /.vscode/
 /documents/
 /docs/
+!/docs/
+/docs/*
+!/docs/architecture/
+!/docs/architecture/**
+!/docs/evaluations/
+!/docs/evaluations/**
 /tools/
 /developer/node_modules/
 /node_modules/

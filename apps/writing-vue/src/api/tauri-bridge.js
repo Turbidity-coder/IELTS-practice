@@ -45,6 +45,8 @@ export function unwrapCommandResponse(response, label = 'command') {
     const error = new Error(message)
     error.code = response.error?.code
     error.retryable = !!response.error?.retryable
+    error.context = response.error?.context
+    error.causeId = response.error?.causeId
     throw error
   }
   return response

@@ -4,6 +4,7 @@ use ielts_application::{
 use ielts_domain::dto::CommandResponse;
 use ielts_domain::ErrorEnvelope;
 use serde::Deserialize;
+use serde_json::json;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
@@ -82,8 +83,9 @@ pub async fn agent_run(
             )))
         }
     };
+    let run_id = uuid::Uuid::new_v4().to_string();
     let command = RunAgentCommand {
-        run_id: uuid::Uuid::new_v4().to_string(),
+        run_id: run_id.clone(),
         provider_id: runtime.config.provider.clone(),
         model: runtime.config.model.clone(),
         system_prompt: AGENT_SYSTEM_PROMPT.into(),
@@ -95,7 +97,9 @@ pub async fn agent_run(
     Ok(
         match AgentService::run(&store, &runtime, &tools, command).await {
             Ok(outcome) => CommandResponse::success(outcome),
-            Err(error) => CommandResponse::failure(application_error(error)),
+            Err(error) => CommandResponse::failure(
+                application_error(error).with_context(json!({"runId": run_id})),
+            ),
         },
     )
 }

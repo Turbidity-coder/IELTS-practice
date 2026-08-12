@@ -2,14 +2,37 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ielts_application::{
-    AgentMessage, AgentModel, AgentModelRequest, AgentModelResponse, AgentToolCall,
-    CompletionRequest, CompletionResponse, LanguageModel, ModelError, TokenUsage,
+    AgentMessage, AgentModel, AgentModelFailure, AgentModelRequest, AgentModelResponse,
+    AgentToolCall, CompletionRequest, CompletionResponse, LanguageModel, ModelError, TokenUsage,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 const MAX_RETRIES: u32 = 2;
+
+struct ChatCompletionFailure {
+    error: ModelError,
+    latency_ms: u64,
+    retry_count: u32,
+    provider_request_id: Option<String>,
+}
+
+impl ChatCompletionFailure {
+    fn new(
+        error: ModelError,
+        latency_ms: u64,
+        retry_count: u32,
+        provider_request_id: Option<String>,
+    ) -> Self {
+        Self {
+            error,
+            latency_ms,
+            retry_count,
+            provider_request_id,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct AiProviderConfig {
@@ -56,9 +79,10 @@ impl LanguageModel for AiRuntime {
             "response_format": { "type": "json_object" },
             "messages": request.messages
         });
-        let (envelope, latency_ms): (ChatResponse, _) = self
+        let (envelope, latency_ms, _retry_count, header_request_id): (ChatResponse, _, _, _) = self
             .post_chat_completion(&body, "AI response envelope invalid")
-            .await?;
+            .await
+            .map_err(|failure| failure.error)?;
         let content = envelope
             .choices
             .into_iter()
@@ -70,19 +94,38 @@ impl LanguageModel for AiRuntime {
             model: envelope.model.unwrap_or_else(|| self.config.model.clone()),
             latency_ms,
             usage: envelope.usage.map(token_usage),
-            provider_request_id: envelope.id,
+            provider_request_id: prefer_provider_request_id(header_request_id, envelope.id),
         })
     }
 }
 
 #[async_trait]
 impl AgentModel for AiRuntime {
-    async fn respond(&self, request: AgentModelRequest) -> Result<AgentModelResponse, ModelError> {
+    async fn respond(
+        &self,
+        request: AgentModelRequest,
+    ) -> Result<AgentModelResponse, AgentModelFailure> {
         let body = agent_request_body(&self.config.model, &request);
-        let (envelope, latency_ms): (AgentChatResponse, _) = self
-            .post_chat_completion(&body, "AI agent response envelope invalid")
-            .await?;
-        parse_agent_response(envelope, &self.config.model, latency_ms)
+        let (envelope, latency_ms, retry_count, header_request_id): (AgentChatResponse, _, _, _) =
+            self.post_chat_completion(&body, "AI agent response envelope invalid")
+                .await
+                .map_err(|failure| {
+                    AgentModelFailure::with_trace(
+                        failure.error,
+                        None,
+                        failure.latency_ms,
+                        None,
+                        failure.provider_request_id,
+                        failure.retry_count,
+                    )
+                })?;
+        parse_agent_response(
+            envelope,
+            &self.config.model,
+            latency_ms,
+            retry_count,
+            header_request_id,
+        )
     }
 }
 
@@ -91,7 +134,7 @@ impl AiRuntime {
         &self,
         body: &Value,
         invalid_envelope: &str,
-    ) -> Result<(T, u64), ModelError> {
+    ) -> Result<(T, u64, u32, Option<String>), ChatCompletionFailure> {
         let endpoint = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
@@ -107,21 +150,33 @@ impl AiRuntime {
                 .await;
             match response {
                 Ok(response) if response.status().is_success() => {
+                    let provider_request_id = provider_request_id_from_headers(response.headers());
                     let envelope = response.json().await.map_err(|error| {
-                        model_error(format!("{invalid_envelope}: {error}"), false)
+                        ChatCompletionFailure::new(
+                            model_error(format!("{invalid_envelope}: {error}"), false),
+                            elapsed_ms(started),
+                            attempt,
+                            provider_request_id.clone(),
+                        )
                     })?;
-                    return Ok((envelope, elapsed_ms(started)));
+                    return Ok((envelope, elapsed_ms(started), attempt, provider_request_id));
                 }
                 Ok(response) => {
                     let status = response.status();
+                    let provider_request_id = provider_request_id_from_headers(response.headers());
                     let retryable = status.is_server_error() || status.as_u16() == 429;
                     if retryable && attempt < MAX_RETRIES {
                         retry_delay(attempt).await;
                         continue;
                     }
-                    return Err(model_error(
-                        format!("AI provider returned HTTP {}", status.as_u16()),
-                        retryable,
+                    return Err(ChatCompletionFailure::new(
+                        model_error(
+                            format!("AI provider returned HTTP {}", status.as_u16()),
+                            retryable,
+                        ),
+                        elapsed_ms(started),
+                        attempt,
+                        provider_request_id,
                     ));
                 }
                 Err(error) => {
@@ -130,9 +185,11 @@ impl AiRuntime {
                         retry_delay(attempt).await;
                         continue;
                     }
-                    return Err(model_error(
-                        format!("AI request failed: {error}"),
-                        retryable,
+                    return Err(ChatCompletionFailure::new(
+                        model_error(format!("AI request failed: {error}"), retryable),
+                        elapsed_ms(started),
+                        attempt,
+                        None,
                     ));
                 }
             }
@@ -270,13 +327,27 @@ fn parse_agent_response(
     envelope: AgentChatResponse,
     fallback_model: &str,
     latency_ms: u64,
-) -> Result<AgentModelResponse, ModelError> {
+    retry_count: u32,
+    header_request_id: Option<String>,
+) -> Result<AgentModelResponse, AgentModelFailure> {
+    let actual_model = envelope.model.unwrap_or_else(|| fallback_model.to_string());
+    let usage = envelope.usage.map(token_usage);
+    let provider_request_id = prefer_provider_request_id(header_request_id, envelope.id);
     let message = envelope
         .choices
         .into_iter()
         .next()
         .map(|choice| choice.message)
-        .ok_or_else(|| model_error("AI agent response contained no choices", false))?;
+        .ok_or_else(|| {
+            AgentModelFailure::with_trace(
+                model_error("AI agent response contained no choices", false),
+                Some(actual_model.clone()),
+                latency_ms,
+                usage.clone(),
+                provider_request_id.clone(),
+                retry_count,
+            )
+        })?;
     Ok(AgentModelResponse {
         content: message.content,
         tool_calls: message
@@ -288,10 +359,11 @@ fn parse_agent_response(
                 arguments_json: call.function.arguments,
             })
             .collect(),
-        model: envelope.model.unwrap_or_else(|| fallback_model.to_string()),
+        model: actual_model,
         latency_ms,
-        usage: envelope.usage.map(token_usage),
-        provider_request_id: envelope.id,
+        usage,
+        provider_request_id,
+        retry_count,
     })
 }
 
@@ -308,6 +380,21 @@ async fn retry_delay(attempt: u32) {
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn provider_request_id_from_headers(headers: &reqwest::header::HeaderMap) -> Option<String> {
+    ["x-request-id", "request-id", "openai-request-id"]
+        .iter()
+        .find_map(|name| headers.get(*name))
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+fn prefer_provider_request_id(
+    header_request_id: Option<String>,
+    body_request_id: Option<String>,
+) -> Option<String> {
+    header_request_id.or(body_request_id)
 }
 
 fn model_error(message: impl Into<String>, retryable: bool) -> ModelError {
@@ -382,11 +469,12 @@ mod tests {
             "usage":{"prompt_tokens":3,"completion_tokens":4}
         }))
         .unwrap();
-        let response = parse_agent_response(envelope, "fallback", 5).unwrap();
+        let response = parse_agent_response(envelope, "fallback", 5, 2, None).unwrap();
         assert!(response.content.is_none());
         assert_eq!(response.tool_calls.len(), 2);
         assert_eq!(response.tool_calls[1].name, "read_file");
         assert_eq!(response.model, "provider-model");
+        assert_eq!(response.retry_count, 2);
         assert_eq!(response.usage.unwrap().output_tokens, 4);
     }
 
@@ -396,7 +484,24 @@ mod tests {
             "choices":[]
         }))
         .unwrap();
-        let error = parse_agent_response(envelope, "fallback", 0).unwrap_err();
-        assert!(error.message.contains("no choices"));
+        let error = parse_agent_response(envelope, "fallback", 7, 2, Some("header-request".into()))
+            .unwrap_err();
+        assert!(error.error.message.contains("no choices"));
+        assert_eq!(error.model.as_deref(), Some("fallback"));
+        assert_eq!(error.latency_ms, 7);
+        assert_eq!(error.retry_count, 2);
+        assert_eq!(error.provider_request_id.as_deref(), Some("header-request"));
+    }
+
+    #[test]
+    fn provider_request_header_takes_precedence_over_body_completion_id() {
+        assert_eq!(
+            prefer_provider_request_id(
+                Some("provider-request".into()),
+                Some("chatcmpl-body-id".into())
+            )
+            .as_deref(),
+            Some("provider-request")
+        );
     }
 }

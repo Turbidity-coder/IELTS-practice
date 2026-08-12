@@ -769,12 +769,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         fs::write(directory.path().join("binary.bin"), [0xff, 0xfe]).unwrap();
         let tools = WorkspaceFileTools::new(directory.path().to_path_buf()).unwrap();
-        for path in ["../outside.txt", ".git/config", ".env"] {
-            let result = tools
-                .execute(&call("read_file", json!({"path":path})))
-                .await;
-            assert_ne!(result.status, ielts_application::AgentToolStatus::Succeeded);
-        }
+        let result = tools
+            .execute(&call("read_file", json!({"path":"../outside.txt"})))
+            .await;
+        assert_eq!(result.error.unwrap().code, "agent.path_escape");
         let absolute = directory.path().join("binary.bin").display().to_string();
         let result = tools
             .execute(&call("read_file", json!({"path":absolute})))
@@ -786,15 +784,36 @@ mod tests {
         assert_eq!(result.error.unwrap().code, "agent.file_not_utf8");
     }
 
+    #[test]
+    fn rejects_every_sensitive_path_before_filesystem_access() {
+        for path in [
+            ".git/config",
+            "nested/.HG/store",
+            ".svn/entries",
+            ".ssh/config",
+            ".gnupg/private-keys-v1.d/key",
+            ".codex/auth.json",
+            ".env",
+            "config/.env.local",
+            "id_rsa",
+            "nested/ID_ED25519",
+            "certificate.pem",
+            "keys/client.P12",
+            "archive/identity.pfx",
+        ] {
+            let failure = validate_relative_path(path).unwrap_err();
+            assert_eq!(failure.code, "agent.sensitive_path", "path: {path}");
+        }
+    }
+
     #[tokio::test]
-    async fn rejects_symlink_escape_when_platform_allows_symlink_creation() {
+    async fn rejects_symlink_escape() {
         let workspace = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("secret.txt"), "outside").unwrap();
         let link = workspace.path().join("linked");
-        if create_directory_symlink(outside.path(), &link).is_err() {
-            return;
-        }
+        create_directory_link(outside.path(), &link)
+            .expect("the test must create a symlink or junction; skipping would hide a regression");
         let tools = WorkspaceFileTools::new(workspace.path().to_path_buf()).unwrap();
         let result = tools
             .execute(&call("read_file", json!({"path":"linked/secret.txt"})))
@@ -808,6 +827,7 @@ mod tests {
             .await;
         assert_eq!(result.error.unwrap().code, "agent.path_escape");
         assert!(!outside.path().join("new.txt").exists());
+        remove_directory_link(&link).unwrap();
     }
 
     #[tokio::test]
@@ -830,13 +850,90 @@ mod tests {
         assert!(!directory.path().join("new.txt").exists());
     }
 
+    #[tokio::test]
+    async fn audit_payloads_exclude_file_bodies_for_every_file_tool() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = "PRIVATE_FILE_BODY_MARKER";
+        fs::write(directory.path().join("note.txt"), marker).unwrap();
+        let tools = WorkspaceFileTools::new(directory.path().to_path_buf()).unwrap();
+
+        let read_call = call("read_file", json!({"path":"note.txt"}));
+        let read_result = tools.execute(&read_call).await;
+        assert!(!tools
+            .audit_arguments(&read_call)
+            .to_string()
+            .contains(marker));
+        assert!(!read_result.audit_result.to_string().contains(marker));
+
+        let write_marker = format!("{marker}_WRITE");
+        let write_call = call(
+            "write_file",
+            json!({"path":"created.txt","content":write_marker}),
+        );
+        let write_result = tools.execute(&write_call).await;
+        assert!(!tools
+            .audit_arguments(&write_call)
+            .to_string()
+            .contains(marker));
+        assert!(!write_result.audit_result.to_string().contains(marker));
+
+        let replace_marker = format!("{marker}_REPLACED");
+        let replace_call = call(
+            "replace_in_file",
+            json!({
+                "path":"note.txt",
+                "oldText":marker,
+                "newText":replace_marker,
+                "expectedSha256":sha256(marker.as_bytes())
+            }),
+        );
+        let replace_result = tools.execute(&replace_call).await;
+        assert!(!tools
+            .audit_arguments(&replace_call)
+            .to_string()
+            .contains(marker));
+        assert!(!replace_result.audit_result.to_string().contains(marker));
+    }
+
     #[cfg(unix)]
-    fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
         std::os::unix::fs::symlink(target, link)
     }
 
     #[cfg(windows)]
-    fn create_directory_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-        std::os::windows::fs::symlink_dir(target, link)
+    fn create_directory_link(target: &Path, link: &Path) -> std::io::Result<()> {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => Ok(()),
+            Err(symlink_error) => {
+                let output = std::process::Command::new("cmd.exe")
+                    .arg("/C")
+                    .arg("mklink")
+                    .arg("/J")
+                    .arg(link)
+                    .arg(target)
+                    .output()?;
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!(
+                            "symlink failed ({symlink_error}); junction failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_directory_link(link: &Path) -> std::io::Result<()> {
+        fs::remove_file(link)
+    }
+
+    #[cfg(windows)]
+    fn remove_directory_link(link: &Path) -> std::io::Result<()> {
+        fs::remove_dir(link)
     }
 }

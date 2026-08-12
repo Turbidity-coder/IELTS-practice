@@ -37,6 +37,7 @@
 
 <script setup>
 import { useRoute } from 'vue-router'
+import { featureFlags } from '../config/feature-flags.js'
 
 const route = useRoute()
 
@@ -44,7 +45,9 @@ const navItems = [
   { key: 'overview', to: '/', label: '总览', path: '/', view: undefined },
   { key: 'reading', to: { path: '/', query: { view: 'browse' } }, label: '阅读', path: '/', view: 'browse' },
   { key: 'writing', to: '/writing', label: '写作', path: '/writing' },
-  { key: 'agent', to: '/agent', label: 'Agent', path: '/agent' },
+  ...(featureFlags.agentWorkspaceV1
+    ? [{ key: 'agent', to: '/agent', label: 'Agent', path: '/agent' }]
+    : []),
   { key: 'history', to: '/history', label: '历史', path: '/history' },
   { key: 'settings', to: '/settings', label: '设置', path: '/settings' }
 ]

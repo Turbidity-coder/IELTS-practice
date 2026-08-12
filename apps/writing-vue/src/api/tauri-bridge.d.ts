@@ -2,6 +2,8 @@ export interface CommandError {
   message?: string
   code?: string
   retryable?: boolean
+  context?: unknown
+  causeId?: string
 }
 
 export interface CommandResponse<T = unknown> {

@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import App from './App.vue'
+import { featureFlags } from './config/feature-flags.js'
 import './assets/writing-design.css'
 import './styles/main.css'
 import './styles/a11y-performance.css'
@@ -70,11 +71,11 @@ const router = createRouter({
             name: 'History',
             component: () => import('./views/HistoryPage.vue')
         },
-        {
+        ...(featureFlags.agentWorkspaceV1 ? [{
             path: '/agent',
             name: 'AgentWorkspace',
             component: () => import('./views/AgentWorkspacePage.vue')
-        },
+        }] : []),
         {
             path: '/settings',
             name: 'Settings',

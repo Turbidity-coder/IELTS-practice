@@ -9,7 +9,9 @@ on PATH (or set TAURI_DRIVER/TAURI_NATIVE_DRIVER).
 from __future__ import annotations
 
 import base64
+import ctypes
 import hashlib
+import http.server
 import json
 import math
 import os
@@ -17,6 +19,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -150,7 +153,8 @@ def blocked(reason: str, missing: list[str]) -> int:
               "status": "blocked", "exitCode": 2, "target": "packaged-tauri-2",
               "reason": reason, "missingDependencies": missing,
               "checks": {"launch": "blocked", "vueRoutes": "blocked", "readingIpc": "blocked",
-                         "uiRouteVisuals": "blocked", "agentIpcBoundary": "blocked",
+                          "uiRouteVisuals": "blocked", "agentIpcBoundary": "blocked",
+                          "agentWorkspaceRun": "blocked",
                          "bundledResources": "blocked", "readingView": "blocked",
                          "readingPerformance": "blocked", "notesDialog": "blocked",
                          "readingSubmitBoundary": "blocked",
@@ -249,6 +253,188 @@ def free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+class FakeAgentProvider:
+    FINAL_REQUEST_ID = "packaged-request-final"
+
+    def __init__(self, expected_tool_hash: str):
+        self.port = free_tcp_port()
+        self.requests: list[dict] = []
+        self.expected_tool_hash = expected_tool_hash
+        self.tool_result_verified = False
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                owner.requests.append(body)
+                messages = body.get("messages") or []
+                tool_results = [message for message in messages if message.get("role") == "tool"]
+                if tool_results:
+                    try:
+                        tool_result = json.loads(tool_results[-1].get("content") or "")
+                    except (TypeError, json.JSONDecodeError):
+                        self.send_error(422, "tool result was not valid JSON")
+                        return
+                    expected = {
+                        "path": "note.txt",
+                        "content": "Packaged Agent workspace evidence.",
+                        "sha256": owner.expected_tool_hash,
+                    }
+                    if any(tool_result.get(key) != value for key, value in expected.items()):
+                        self.send_error(422, "read_file did not return the expected file")
+                        return
+                    owner.tool_result_verified = True
+                    message = {"content": "Packaged Agent run completed from the local fake provider.",
+                               "tool_calls": []}
+                    body_request_id = "chatcmpl-packaged-final"
+                    header_request_id = owner.FINAL_REQUEST_ID
+                else:
+                    message = {
+                        "content": None,
+                        "tool_calls": [{
+                            "id": "packaged-read-1",
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{\"path\":\"note.txt\"}"},
+                        }],
+                    }
+                    body_request_id = "chatcmpl-packaged-tool"
+                    header_request_id = "packaged-request-tool"
+                payload = json.dumps({
+                    "id": body_request_id,
+                    "model": "packaged-fake-model-actual",
+                    "choices": [{"message": message}],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("x-request-id", header_request_id)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, _format, *_args):
+                return
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/v1"
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+def drive_windows_folder_picker(path: Path) -> tuple[threading.Thread, dict]:
+    if os.name != "nt":
+        raise RuntimeError("packaged workspace picker automation currently requires Windows")
+    state: dict = {"status": "waiting"}
+    resolved = str(path.resolve())
+
+    def worker() -> None:
+        try:
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GlobalAlloc.restype = ctypes.c_void_p
+            kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+            kernel32.GlobalLock.restype = ctypes.c_void_p
+            kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+            user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+            user32.SetClipboardData.restype = ctypes.c_void_p
+            user32.GetDlgItem.restype = wintypes.HWND
+            callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+            def window_text(hwnd) -> str:
+                length = user32.GetWindowTextLengthW(hwnd)
+                buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buffer, len(buffer))
+                return buffer.value
+
+            def class_name(hwnd) -> str:
+                buffer = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, buffer, len(buffer))
+                return buffer.value
+
+            dialog = None
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and dialog is None:
+                candidates = []
+
+                @callback_type
+                def collect(hwnd, _lparam):
+                    if user32.IsWindowVisible(hwnd) and class_name(hwnd) == "#32770":
+                        candidates.append(hwnd)
+                    return True
+
+                user32.EnumWindows(collect, 0)
+                dialog = next(
+                    (hwnd for hwnd in candidates if user32.GetDlgItem(hwnd, 1)),
+                    None,
+                )
+                if dialog is None:
+                    time.sleep(0.1)
+            if dialog is None:
+                raise RuntimeError("workspace folder dialog was not found")
+
+            encoded = (resolved + "\0").encode("utf-16-le")
+            handle = kernel32.GlobalAlloc(0x0002, len(encoded))
+            if not handle:
+                raise RuntimeError("failed to allocate clipboard memory")
+            pointer = kernel32.GlobalLock(handle)
+            ctypes.memmove(pointer, encoded, len(encoded))
+            kernel32.GlobalUnlock(handle)
+            if not user32.OpenClipboard(None):
+                raise RuntimeError("failed to open clipboard")
+            try:
+                user32.EmptyClipboard()
+                if not user32.SetClipboardData(13, handle):
+                    raise RuntimeError("failed to set clipboard path")
+            finally:
+                user32.CloseClipboard()
+
+            def key(vk: int, up: bool = False) -> None:
+                user32.keybd_event(vk, 0, 0x0002 if up else 0, 0)
+
+            def chord(modifier: int, value: int) -> None:
+                key(modifier)
+                key(value)
+                key(value, True)
+                key(modifier, True)
+
+            user32.SetForegroundWindow(dialog)
+            time.sleep(0.15)
+            chord(0x11, ord("L"))
+            time.sleep(0.1)
+            chord(0x11, ord("V"))
+            key(0x0D)
+            key(0x0D, True)
+            time.sleep(0.6)
+            confirm = user32.GetDlgItem(dialog, 1)
+            if not confirm:
+                raise RuntimeError("workspace folder confirmation button was not found")
+            user32.PostMessageW(confirm, 0x00F5, 0, 0)
+            state.update({
+                "status": "submitted",
+                "dialogTitle": window_text(dialog),
+                "buttonTitle": window_text(confirm),
+            })
+        except Exception as error:
+            state.update({"status": "failed", "error": str(error)})
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    return thread, state
 
 
 def stage_test_runtime(app: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
@@ -407,7 +593,19 @@ def main() -> int:
     proc = None
     driver_log = None
     staged_runtime = None
+    isolated_app_data = None
+    agent_workspace = None
+    fake_agent_provider = None
+    picker_thread = None
+    picker_state = None
     try:
+        isolated_app_data = tempfile.TemporaryDirectory(prefix="ielts-tauri-appdata-")
+        agent_workspace = tempfile.TemporaryDirectory(prefix="ielts-agent-workspace-")
+        agent_note = Path(agent_workspace.name, "note.txt")
+        agent_note.write_text("Packaged Agent workspace evidence.", encoding="utf-8")
+        expected_agent_note_hash = sha256_file(agent_note)
+        fake_agent_provider = FakeAgentProvider(expected_agent_note_hash)
+        fake_agent_provider.start()
         staged_runtime, runtime_app = stage_test_runtime(app)
         metadata["stagedRuntimePath"] = str(runtime_app)
         DRIVER_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -426,6 +624,7 @@ def main() -> int:
             stdout=driver_log,
             stderr=subprocess.STDOUT,
             text=True,
+            env={**os.environ, "APPDATA": isolated_app_data.name},
         )
         status = None
         deadline = time.monotonic() + 30
@@ -497,6 +696,114 @@ def main() -> int:
                 or invalid_agent_error.get("code") != "agent.invalid_request"):
             raise RuntimeError(f"agent_run empty-prompt boundary failed: {invalid_agent_request}")
         checks["agentIpcBoundary"] = "passed"
+        ai_config = driver.script("""
+            return window.__TAURI_INTERNALS__.invoke('ai_upsert_config', {cmd: {
+              id: 'packaged-agent-e2e', configName: 'Packaged Agent E2E',
+              provider: 'openai', baseUrl: arguments[0],
+              defaultModel: 'packaged-fake-model-requested', isEnabled: true,
+              apiKey: 'packaged-local-only-key'
+            }})
+        """, [fake_agent_provider.base_url])
+        ai_config_data = (ai_config or {}).get("data") if isinstance(ai_config, dict) else None
+        if not isinstance(ai_config, dict) or not ai_config.get("ok") or not isinstance(ai_config_data, dict):
+            raise RuntimeError(f"packaged Agent fake provider config failed: {ai_config}")
+        selected_ai = driver.script(
+            "return window.__TAURI_INTERNALS__.invoke('ai_set_default_config', {id: arguments[0]})",
+            [ai_config_data["id"]],
+        )
+        if not isinstance(selected_ai, dict) or not selected_ai.get("ok"):
+            raise RuntimeError(f"packaged Agent default provider selection failed: {selected_ai}")
+
+        picker_thread, picker_state = drive_windows_folder_picker(Path(agent_workspace.name))
+        clicked = driver.script("""
+            location.hash = '#/agent';
+            const button = document.querySelector('.agent-workspace-select');
+            if (!button) return false;
+            button.click();
+            return true;
+        """)
+        if not clicked:
+            raise RuntimeError("packaged Agent workspace button was unavailable")
+        picker_thread.join(timeout=15)
+        if picker_thread.is_alive():
+            raise RuntimeError("native Agent workspace picker automation timed out")
+        if picker_state.get("status") != "submitted":
+            raise RuntimeError(f"native Agent workspace picker automation failed: {picker_state}")
+        workspace_name = Path(agent_workspace.name).name
+        wait_for_value(
+            driver,
+            f"return document.querySelector('.agent-workspace-select')?.textContent.includes({workspace_name!r})",
+        )
+        started = driver.script("""
+            const button = document.querySelector('.agent-run-button');
+            if (!button || button.disabled) return false;
+            button.click();
+            return true;
+        """)
+        if not started:
+            raise RuntimeError("packaged Agent run button was unavailable after workspace grant")
+        agent_state = wait_for_value(driver, """
+            const status = document.querySelector('.agent-page-header__status');
+            if (!status?.classList.contains('is-complete') && !status?.classList.contains('is-error')) return null;
+            return {
+              state: status.classList.contains('is-complete') ? 'complete' : 'error',
+              output: document.querySelector('.agent-output-panel p')?.textContent || ''
+            };
+        """, timeout_seconds=30)
+        if agent_state.get("state") != "complete":
+            raise RuntimeError(f"packaged Agent run failed in the real workspace UI: {agent_state}")
+        agent_ui = driver.script("""
+            const values = Object.fromEntries(Array.from(document.querySelectorAll('.agent-output-metadata div')).map(row => [
+              row.querySelector('dt')?.textContent.trim(), row.querySelector('dd')?.textContent.trim()
+            ]));
+            return {
+              output: document.querySelector('.agent-output-panel p')?.textContent || '',
+              tools: document.querySelector('.agent-run-steps')?.textContent || '',
+              values
+            };
+        """)
+        run_id = (agent_ui.get("values") or {}).get("Run ID") if isinstance(agent_ui, dict) else None
+        if not run_id or "read_file" not in agent_ui.get("tools", ""):
+            raise RuntimeError(f"packaged Agent UI did not render run/tool evidence: {agent_ui}")
+        hydrated_agent_run = driver.script(
+            "return window.__TAURI_INTERNALS__.invoke('agent_get_run', {runId: arguments[0]})",
+            [run_id],
+        )
+        hydrated_data = (
+            hydrated_agent_run.get("data") if isinstance(hydrated_agent_run, dict) else None
+        )
+        tool_calls = hydrated_data.get("toolCalls") if isinstance(hydrated_data, dict) else None
+        tool_call = tool_calls[0] if isinstance(tool_calls, list) and len(tool_calls) == 1 else {}
+        tool_result = tool_call.get("result") or {}
+        if (not isinstance(hydrated_agent_run, dict) or not hydrated_agent_run.get("ok")
+                or not isinstance(hydrated_data, dict) or hydrated_data.get("status") != "completed"
+                or len(tool_calls or []) != 1 or tool_call.get("toolName") != "read_file"
+                or tool_call.get("status") != "succeeded" or tool_result.get("path") != "note.txt"
+                or tool_result.get("sha256") != expected_agent_note_hash):
+            raise RuntimeError(f"packaged Agent SQLite hydration failed: {hydrated_agent_run}")
+        trace = hydrated_data.get("result") or {}
+        required_trace = ("actualModel", "latencyMs", "usage", "retryCount",
+                          "providerRequestId", "promptHash")
+        if any(key not in trace for key in required_trace) or "content" in trace:
+            raise RuntimeError(f"packaged Agent trace is incomplete or retained response content: {trace}")
+        if trace.get("providerRequestId") != FakeAgentProvider.FINAL_REQUEST_ID:
+            raise RuntimeError(f"provider request header did not win over body completion ID: {trace}")
+        if not fake_agent_provider.tool_result_verified:
+            raise RuntimeError("fake provider did not observe a successful read_file result")
+        if len(fake_agent_provider.requests) != 2:
+            raise RuntimeError(
+                f"packaged Agent fake provider expected two rounds, got {len(fake_agent_provider.requests)}"
+            )
+        metadata["agentWorkspaceRun"] = {
+            "runId": run_id,
+            "output": agent_ui["output"],
+            "toolCalls": hydrated_data["toolCalls"],
+            "trace": trace,
+            "providerRounds": len(fake_agent_provider.requests),
+            "workspacePicker": picker_state,
+        }
+        driver.screenshot(AGENT_SCREENSHOT)
+        checks["agentWorkspaceRun"] = "passed"
         archive = driver.script(
             "return window.__TAURI_INTERNALS__.invoke('reading_export_archive')"
         )
@@ -709,10 +1016,16 @@ def main() -> int:
     finally:
         driver.close()
         stop_process(proc)
+        if fake_agent_provider:
+            fake_agent_provider.close()
         if driver_log:
             driver_log.close()
         if staged_runtime:
             staged_runtime.cleanup()
+        if agent_workspace:
+            agent_workspace.cleanup()
+        if isolated_app_data:
+            isolated_app_data.cleanup()
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
