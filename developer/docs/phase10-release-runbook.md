@@ -27,11 +27,28 @@ The private key must never be committed. A release fails before build if the pri
 key or updater public key is missing. Development builds remain explicitly
 unconfigured and cannot download updates.
 
+## Local sidecar prerequisite
+
+Any local Tauri compilation, static gate, or Rust workspace test requires the frozen
+Python agent runtime sidecar for the host target. On a fresh clone or source ZIP,
+build it before running the gates below:
+
+```powershell
+python -m pip install -r agent-runtime-python/requirements-build.lock
+python -m pip install -r agent-runtime-python/requirements.lock
+python developer/tests/ci/build_agent_runtime_sidecar.py --target <host-target>
+```
+
+`<host-target>` is one of `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`, or
+`x86_64-unknown-linux-gnu`. The CI release workflow prepares its own per-platform
+sidecars automatically; this step is only needed for local gate runs.
+
 ## Release
 
 1. Set the same semantic version in `src-tauri/tauri.conf.json`,
    `src-tauri/Cargo.toml`, and `apps/writing-vue/package.json`.
-2. Run the required gates in order:
+2. Build the sidecar for the host target (see Local sidecar prerequisite), then run
+   the required gates in order:
 
    ```powershell
    python developer/tests/ci/run_static_suite.py
@@ -40,8 +57,8 @@ unconfigured and cannot download updates.
 
 3. Push an annotated `vX.Y.Z` tag. The tag must match all three shipping versions.
 4. The release workflow builds Windows, macOS arm64, and Linux bundles. Each job
-   verifies an installable package, updater archive, and matching `.sig` before it
-   can complete.
+   prepares its own matching sidecar, then verifies an installable package, updater
+   archive, and matching `.sig` before it can complete.
 5. Windows additionally passes `signtool verify`; macOS passes strict `codesign`
    verification and Gatekeeper `spctl` assessment after notarization.
 6. The release remains draft until `latest.json` contains signed HTTPS entries for
